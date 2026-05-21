@@ -1,0 +1,114 @@
+TARGET = pcsx4all
+PORT   = sf3000
+
+USE_GPULIB ?= 1
+GPU        = gpu_unai
+SPU        = spu_pcsxrearmed
+RECOMPILER = mips
+
+TOOLCHAIN = $(HOME)/sf3000-work/sf3000toolchain/mipsel-buildroot-linux-gnu_sdk-buildroot/opt/ext-toolchain/bin/mips-mti-linux-gnu-
+SYSROOT   = $(HOME)/sf3000-work/sf3000toolchain/mipsel-buildroot-linux-gnu_sdk-buildroot/mipsel-buildroot-linux-gnu/sysroot
+
+CC  = $(TOOLCHAIN)gcc
+CXX = $(TOOLCHAIN)g++
+LD  = $(TOOLCHAIN)gcc
+RM  = rm -f
+MD  = mkdir -p
+
+C_ARCH = -mips32r2 -march=mips32r2 -mtune=24kc -mfp32 -mhard-float \
+         -mlong-calls -EL --sysroot=$(SYSROOT) \
+         -DSHMEM_MIRRORING -DMIPS_HAS_R2_INSTS
+
+MCD1_FILE = \"mcd001.mcr\"
+MCD2_FILE = \"mcd002.mcr\"
+
+CFLAGS  = $(C_ARCH) -Ofast -DNDEBUG \
+          -Wall -Wunused -Wpointer-arith \
+          -Wno-sign-compare -Wno-cast-align \
+          -Isrc -Isrc/spu/$(SPU) -D$(SPU) -Isrc/gpu/$(GPU) \
+          -Isrc/port/$(PORT) -Isrc/port/$(PORT)/SDL \
+          -Isrc/plugin_lib -Isrc/port/common \
+          -DXA_HACK \
+          -DINLINE="static __inline__" -Dasm="__asm__ __volatile__" \
+          -DMCD1_FILE=$(MCD1_FILE) -DMCD2_FILE=$(MCD2_FILE) \
+          -DCHEAT_UNZIP -DHW_SCALE -DFORCE_MEMCPY32 -DFORCE_FULLSCREEN
+
+CFLAGS += -D$(shell echo $(GPU) | tr a-z A-Z)
+CFLAGS += -D$(shell echo $(SPU) | tr a-z A-Z)
+CFLAGS += -DUSE_GPULIB
+
+ifdef RECOMPILER
+CFLAGS += -DPSXREC -D$(RECOMPILER)
+endif
+
+LDFLAGS = -mips32r2 -mhard-float -mfp32 -EL \
+          --sysroot=$(SYSROOT) \
+          -L$(SYSROOT)/usr/lib \
+          -lc -lgcc -lm -lpthread -lrt -lz \
+          -Wl,--as-needed -Wl,--gc-sections
+
+OBJDIRS = obj obj/gpu obj/gpu/$(GPU) obj/gpu/gpulib obj/spu obj/spu/$(SPU) \
+          obj/recompiler obj/recompiler/$(RECOMPILER) \
+          obj/port obj/port/$(PORT) \
+          obj/plugin_lib obj/port/common
+
+all: maketree $(TARGET)
+
+OBJS = \
+    obj/r3000a.o obj/psxinterpreter.o obj/misc.o obj/plugins.o obj/pad.o \
+    obj/psxmem.o obj/psxhw.o \
+    obj/psxcounters.o obj/psxdma.o obj/psxbios.o obj/psxhle.o obj/psxevents.o \
+    obj/psxcommon.o \
+    obj/cdrom.o obj/cdriso.o obj/ppf.o obj/decode_xa.o \
+    obj/mdec.o obj/gte.o obj/cheat.o obj/sio.o
+
+OBJS += \
+    obj/gpu/$(GPU)/gpulib_if.o \
+    obj/gpu/gpulib/gpu.o obj/gpu/gpulib/vout_port.o
+
+OBJS += obj/spu/$(SPU)/spu.o \
+        obj/spu/$(SPU)/adsr.o \
+        obj/spu/$(SPU)/dma.o obj/spu/$(SPU)/freeze.o \
+        obj/spu/$(SPU)/out.o obj/spu/$(SPU)/registers.o \
+        obj/spu/$(SPU)/reverb.o \
+        obj/spu/$(SPU)/xa.o \
+        obj/spu/$(SPU)/nullsnd.o
+
+OBJS += obj/recompiler/mips/recompiler.o \
+        obj/recompiler/mips/host_asm.o \
+        obj/recompiler/mips/mem_mapping.o \
+        obj/recompiler/mips/mips_codegen.o \
+        obj/recompiler/mips/mips_disasm.o
+
+OBJS += obj/port/$(PORT)/port.o obj/port/$(PORT)/fonts.o
+OBJS += obj/port/common/frontend.o obj/port/common/cdrom_hacks.o
+OBJS += obj/plugin_lib/perfmon.o obj/plugin_lib/plugin_lib.o \
+        obj/plugin_lib/pl_sshot.o
+
+maketree:
+	$(MD) $(OBJDIRS)
+
+$(TARGET): $(OBJS)
+	@echo "Linking $(TARGET)..."
+	$(LD) $(OBJS) $(LDFLAGS) -o $@
+
+obj/%.o: src/%.c
+	@echo "CC $<"
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+obj/%.o: src/%.cpp
+	@echo "CXX $<"
+	$(CXX) $(CFLAGS) -c -o $@ $<
+
+obj/%.o: src/%.S
+	@echo "AS $<"
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+obj/%.o: src/%.s
+	@echo "AS $<"
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+clean:
+	$(RM) -r obj $(TARGET)
+
+.PHONY: all maketree clean
