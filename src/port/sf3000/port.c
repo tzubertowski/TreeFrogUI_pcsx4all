@@ -266,6 +266,16 @@ static void display_blit(const void *src, int w, int h, int pitch) {
     last_tv = tv;
 }
 
+static void shutdown_display(void) {
+    if (fb_fd >= 0) {
+        struct fb_var_screeninfo vi = vinfo;
+        vi.xoffset = 0; vi.yoffset = 0;
+        ioctl(fb_fd, FBIOPAN_DISPLAY, &vi);
+        if (fb_mem && fb_mem != MAP_FAILED) { munmap(fb_mem, fb_size); fb_mem = NULL; }
+        close(fb_fd); fb_fd = -1;
+    }
+}
+
 /* --------------------------------------------------------------------------
  * Input: cubevol shared memory
  * -------------------------------------------------------------------------- */
@@ -349,15 +359,22 @@ static void sf3000_menu(void) {
         if (!cv_keys) continue;
         uint32_t k = *cv_keys;
 
-        int up  = btn(k, CV_UP)   && !btn(prev, CV_UP);
-        int dn  = btn(k, CV_DOWN) && !btn(prev, CV_DOWN);
-        int a   = btn(k, CV_A)    && !btn(prev, CV_A);
-        int b   = btn(k, CV_B)    && !btn(prev, CV_B);
+        int up  = btn(k, CV_UP)    && !btn(prev, CV_UP);
+        int dn  = btn(k, CV_DOWN)  && !btn(prev, CV_DOWN);
+        int lt  = btn(k, CV_LEFT)  && !btn(prev, CV_LEFT);
+        int rt  = btn(k, CV_RIGHT) && !btn(prev, CV_RIGHT);
+        int a   = btn(k, CV_A)     && !btn(prev, CV_A);
+        int b   = btn(k, CV_B)     && !btn(prev, CV_B);
         prev = k;
 
         if (up && sel > 0)   sel--;
         if (dn && sel < n-1) sel++;
         if (b) return;
+        /* LEFT/RIGHT toggles the current item directly (same as A for toggles) */
+        if ((lt || rt) && sel == 3) {
+            scale_mode = (scale_mode + 1) % 2;
+            last_fb_y_off = -1; last_fb_y_len = -1;
+        }
         if (a) {
             switch (sel) {
                 case 0: return;
@@ -365,7 +382,7 @@ static void sf3000_menu(void) {
                 case 2: state_load(1); usleep(300000); return;
                 case 3:
                     scale_mode = (scale_mode + 1) % 2;
-                    last_fb_y_off = -1; last_fb_y_len = -1; /* force redraw */
+                    last_fb_y_off = -1; last_fb_y_len = -1;
                     break;
                 case 4: {
                     extern int GameMenu(void);
@@ -470,6 +487,7 @@ uint16_t pad_read(int num) { return (num == 0 ? pad1 : 0xFFFF); }
  * Video API
  * -------------------------------------------------------------------------- */
 void video_flip(void) {
+    if (Config.ShowFps) port_printf(2, 2, pl_data.stats_msg);
     display_blit(SCREEN, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH * 2);
 }
 
@@ -682,8 +700,6 @@ int main(int argc, char *argv[]) {
 #endif
 
     config_load();
-    plog("main: config loaded");
-
     /* ROM from command line arg 1 */
     if (argc >= 2) {
         SetIsoFile(argv[1]);
@@ -692,16 +708,18 @@ int main(int argc, char *argv[]) {
         if (sl) *sl = '\0';
     }
 
-    if (display_init() < 0) { plog("main: display_init FAILED"); return 1; }
-    plog("main: display_init OK");
+    if (display_init() < 0) { plog("display_init FAILED"); return 1; }
+    atexit(shutdown_display);
     input_init();
-    plog("main: input_init OK");
 
     mkdir(sstatesdir, 0755);
     mkdir(cheatsdir, 0755);
 
-    if (psxInit() == -1) { plog("main: psxInit FAILED"); return 1; }
-    plog("main: psxInit OK");
+    if (psxInit() == -1) { plog("psxInit FAILED"); return 1; }
+    {
+        extern R3000Acpu psxRec;
+        plog(psxCpu == &psxRec ? "dynarec ACTIVE" : "INTERPRETER (slow!)");
+    }
 #ifdef SPU_PCSXREARMED
     spu_config.iHaveConfiguration = 1;
     spu_config.iUseReverb         = 0;
@@ -712,36 +730,25 @@ int main(int argc, char *argv[]) {
     spu_config.iUseFixedUpdates   = 0;
     spu_config.iDisabled          = 0;
 #endif
-    plog("main: CDR_init start");
-    if (CDR_init() < 0) { plog("main: CDR_init FAILED"); return 1; }
-    plog("main: GPU_init start");
-    if (GPU_init() < 0) { plog("main: GPU_init FAILED"); return 1; }
-    plog("main: SPU_init start");
-    if (SPU_init() < 0) { plog("main: SPU_init FAILED"); return 1; }
-    plog("main: CDR_open start");
-    if (CDR_open() < 0) { plog("main: CDR_open FAILED"); return 1; }
-    plog("main: plugins OK");
-    plog("main: LoadPlugins OK");
+    if (CDR_init() < 0) { plog("CDR_init FAILED"); return 1; }
+    if (GPU_init() < 0) { plog("GPU_init FAILED"); return 1; }
+    if (SPU_init() < 0) { plog("SPU_init FAILED"); return 1; }
+    if (CDR_open() < 0) { plog("CDR_open FAILED"); return 1; }
 
     pl_init();
     psxReset();
-    plog("main: psxReset OK");
 
     if (argc >= 2) {
         if (CheckCdrom() == -1) {
-            plog("main: CheckCdrom FAILED");
             SetIsoFile(NULL);
         } else if (LoadCdrom() == -1) {
-            plog("main: LoadCdrom FAILED");
             SetIsoFile(NULL);
         } else {
             cheat_load();
-            plog("main: LoadCdrom OK");
         }
     }
 
     CheckforCDROMid_applyhacks();
-    plog("main: starting CPU");
 
     psxCpu->Execute();
 

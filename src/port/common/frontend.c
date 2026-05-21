@@ -2349,13 +2349,7 @@ int SelectGame()
 
 int GameMenu()
 {
-  extern void plog_pub(const char *msg);
-  plog_pub("GameMenu: enter");
   video_clear();
-  plog_pub("GameMenu: video_clear OK");
   video_flip();
-  plog_pub("GameMenu: video_flip OK");
-  int r = gui_RunMenu(&gui_GameMenu);
-  plog_pub("GameMenu: returned");
-  return r;
+  return gui_RunMenu(&gui_GameMenu);
 }
