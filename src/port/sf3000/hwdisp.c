@@ -167,38 +167,84 @@ static void upscale_nearest(const void *src, int w, int h, int pitch_bytes) {
     const int nx = dst_w / w;    /* H replication factor (integer) */
     const int ny = dst_h / h;    /* V replication factor (integer) */
 
-    /* Integer-scale fast path: expand one row, copy ny times. */
+    /* Integer-scale fast path: expand one row, copy ny times.
+     * Use uint32_t writes (2 px/word) where alignment permits. */
     if (nx >= 1 && ny >= 1 && nx * w == dst_w && ny * h == dst_h) {
         const int row_bytes = dst_w * 2;
         for (int sy = 0; sy < h; sy++) {
             const uint16_t *srow = s + sy * sp;
             uint16_t *drow = g_near_buf + (size_t)(sy * ny + off_y) * HW_W + off_x;
-            /* Expand horizontally: each src pixel → nx dst pixels */
-            if (nx == 1) {
+
+            switch (nx) {
+            case 1:
                 memcpy(drow, srow, (size_t)w * 2);
-            } else if (nx == 2) {
+                break;
+            case 2: {
+                /* 1 src px → 1 uint32_t write (p|p<<16) */
+                uint32_t *d32 = (uint32_t *)drow;
+                for (int sx = 0; sx < w; sx++) {
+                    uint32_t p = srow[sx];
+                    d32[sx] = p | (p << 16);
+                }
+                break;
+            }
+            case 3:
                 for (int sx = 0; sx < w; sx++) {
                     uint16_t p = srow[sx];
-                    drow[sx*2+0] = p; drow[sx*2+1] = p;
+                    uint16_t *dp = drow + sx * 3;
+                    dp[0] = p; dp[1] = p; dp[2] = p;
                 }
-            } else if (nx == 3) {
+                break;
+            case 4: {
+                /* 1 src px → 2 uint32_t writes */
+                uint32_t *d32 = (uint32_t *)drow;
+                for (int sx = 0; sx < w; sx++) {
+                    uint32_t p = srow[sx];
+                    uint32_t pp = p | (p << 16);
+                    d32[sx*2  ] = pp;
+                    d32[sx*2+1] = pp;
+                }
+                break;
+            }
+            case 5:
                 for (int sx = 0; sx < w; sx++) {
                     uint16_t p = srow[sx];
-                    drow[sx*3+0] = p; drow[sx*3+1] = p; drow[sx*3+2] = p;
+                    uint16_t *dp = drow + sx * 5;
+                    dp[0] = p; dp[1] = p; dp[2] = p; dp[3] = p; dp[4] = p;
                 }
-            } else if (nx == 4) {
+                break;
+            case 6: {
+                uint32_t *d32 = (uint32_t *)drow;
                 for (int sx = 0; sx < w; sx++) {
-                    uint16_t p = srow[sx];
-                    drow[sx*4+0] = p; drow[sx*4+1] = p;
-                    drow[sx*4+2] = p; drow[sx*4+3] = p;
+                    uint32_t p = srow[sx];
+                    uint32_t pp = p | (p << 16);
+                    d32[sx*3  ] = pp;
+                    d32[sx*3+1] = pp;
+                    d32[sx*3+2] = pp;
                 }
-            } else {
+                break;
+            }
+            case 8: {
+                uint32_t *d32 = (uint32_t *)drow;
+                for (int sx = 0; sx < w; sx++) {
+                    uint32_t p = srow[sx];
+                    uint32_t pp = p | (p << 16);
+                    d32[sx*4  ] = pp;
+                    d32[sx*4+1] = pp;
+                    d32[sx*4+2] = pp;
+                    d32[sx*4+3] = pp;
+                }
+                break;
+            }
+            default:
                 for (int sx = 0; sx < w; sx++) {
                     uint16_t p = srow[sx];
                     uint16_t *dp = drow + sx * nx;
                     for (int k = 0; k < nx; k++) dp[k] = p;
                 }
+                break;
             }
+
             /* Vertical replication: copy this row (ny-1) more times */
             for (int v = 1; v < ny; v++)
                 memcpy(drow + (size_t)v * HW_W, drow, row_bytes);

@@ -153,7 +153,9 @@ static int display_init(void) {
 }
 
 static void display_blit(const void *src, int w, int h, int pitch) {
-    if (use_hwdisp) {
+    /* HW path only for bilinear filter. Nearest uses SW direct-to-fb below
+     * (no DMA round-trip). */
+    if (use_hwdisp && scale_filter == 1) {
         hwdisp_present(src, w, h, pitch);
         return;
     }
