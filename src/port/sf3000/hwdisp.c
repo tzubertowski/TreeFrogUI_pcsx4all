@@ -1,10 +1,13 @@
 /* sf3000-hwdisp implementation. dlopen's driver.so, calls video_driver_*.
- * Contract proven by hwdisp_probe v2:
- *   - dlopen("/mnt/sdcard/cubegm/driver.so")
- *   - video_drivers_init() returns >0
- *   - video_driver_disp_frame(src, w, h, pitch) returns 0, displays frame
- *   - video_driver_deinit() clean
- * Driver expects 1280x720 RGB565 source; HW scales to physical panel (854x480). */
+ *
+ * Driver scales src dims → panel (854x480) via HCGE DMA with bilinear filter.
+ * Two filter modes:
+ *   - HW (default): pass src as-is, driver scales (bilinear).
+ *   - Nearest: SW nearest-upscale src to driver native (1280x720) framing,
+ *     so driver doesn't scale further → pixels stay sharp.
+ *
+ * Aspect-pad: when target aspect set, source is centered horizontally with
+ * black pillar-bars so driver's stretch becomes uniform. */
 
 #include "hwdisp.h"
 
@@ -21,7 +24,6 @@
 static void   *g_handle = NULL;
 static int     g_active = 0;
 
-/* driver.so function pointers */
 typedef int  (*fn_init_t)(void);
 typedef void (*fn_deinit_t)(void);
 typedef int  (*fn_disp_t)(void *src, int w, int h, int pitch);
@@ -30,8 +32,18 @@ static fn_init_t   p_init   = NULL;
 static fn_deinit_t p_deinit = NULL;
 static fn_disp_t   p_disp   = NULL;
 
-/* upscale destination (1280x720 RGB565) */
-static uint16_t *g_dst = NULL;
+/* Aspect-pad staging buffer (lazy alloc, resized on demand) */
+static uint16_t *g_pad_buf  = NULL;
+static int       g_pad_cap  = 0;
+static int       g_pad_w    = 0;
+static int       g_pad_h    = 0;
+
+/* Nearest-upscale buffer (always 1280x720) */
+static uint16_t *g_near_buf = NULL;
+
+static int g_aspect_num = 0;
+static int g_aspect_den = 0;
+static int g_filter_nearest = 0;
 
 int hwdisp_init(void) {
     if (g_active) return 0;
@@ -60,15 +72,6 @@ int hwdisp_init(void) {
         return -1;
     }
 
-    g_dst = (uint16_t*)malloc(HW_BUFSZ);
-    if (!g_dst) {
-        fprintf(stderr, "hwdisp: malloc %d bytes failed\n", HW_BUFSZ);
-        p_deinit();
-        dlclose(g_handle); g_handle = NULL;
-        return -1;
-    }
-    memset(g_dst, 0, HW_BUFSZ);
-
     g_active = 1;
     fprintf(stderr, "hwdisp: HW path active (init rv=%d)\n", rv);
     return 0;
@@ -76,44 +79,191 @@ int hwdisp_init(void) {
 
 int hwdisp_active(void) { return g_active; }
 
-/* Nearest-neighbor upscale src(w×h) → g_dst(1280×720), then present.
- * src is RGB565. For 320×240 source: 4× horizontal, 3× vertical (integer).
- * Other sizes: nearest-neighbor general formula. */
-static void upscale_to_hw(const void *src, int sw, int sh, int spitch_bytes) {
-    const uint16_t *s = (const uint16_t *)src;
-    const int sp = spitch_bytes / 2; /* source stride in pixels */
+void hwdisp_set_target_aspect(int num, int den) {
+    g_aspect_num = num;
+    g_aspect_den = den;
+}
 
-    /* Precompute X mapping: dst x -> src x */
-    static int xmap[HW_W];
-    static int last_sw = -1;
-    if (sw != last_sw) {
-        for (int dx = 0; dx < HW_W; dx++) xmap[dx] = dx * sw / HW_W;
-        last_sw = sw;
+void hwdisp_set_filter(int nearest) {
+    g_filter_nearest = nearest ? 1 : 0;
+    /* If switching to nearest, ensure native buffer exists. */
+    if (g_filter_nearest && !g_near_buf) {
+        g_near_buf = (uint16_t*)malloc(HW_BUFSZ);
+        if (g_near_buf) memset(g_near_buf, 0, HW_BUFSZ);
+    }
+}
+
+/* Pad horizontally: src(w×h) → g_pad_buf(pad_w×h), src centered, sides black. */
+static void pad_horizontal(const void *src, int w, int h, int pitch_bytes, int pad_w) {
+    int need = pad_w * h;
+    if (need > g_pad_cap) {
+        free(g_pad_buf);
+        g_pad_cap = need + 4096;
+        g_pad_buf = (uint16_t*)malloc(g_pad_cap * sizeof(uint16_t));
+        g_pad_h   = 0;
+        g_pad_w   = 0;
+    }
+    if (!g_pad_buf) return;
+
+    int off_x = (pad_w - w) / 2;
+    if (off_x < 0) off_x = 0;
+
+    if (pad_w != g_pad_w || h != g_pad_h) {
+        memset(g_pad_buf, 0, (size_t)pad_w * h * sizeof(uint16_t));
+        g_pad_w = pad_w;
+        g_pad_h = h;
     }
 
-    for (int dy = 0; dy < HW_H; dy++) {
-        int sy = dy * sh / HW_H;
-        const uint16_t *srow = s + sy * sp;
-        uint16_t *drow = g_dst + dy * HW_W;
-        /* Pixel-by-pixel upscale (cache-friendly: sequential writes) */
-        for (int dx = 0; dx < HW_W; dx++) {
-            drow[dx] = srow[xmap[dx]];
+    for (int y = 0; y < h; y++) {
+        const uint16_t *srow = (const uint16_t *)((const char *)src + y * pitch_bytes);
+        uint16_t *drow = g_pad_buf + (size_t)y * pad_w + off_x;
+        memcpy(drow, srow, (size_t)w * sizeof(uint16_t));
+    }
+}
+
+/* Nearest-upscale src into g_near_buf (1280×720). Pads with black to fit
+ * target aspect if set. Otherwise full-stretch upscales to 1280×720.
+ *
+ * Fast paths:
+ *   - Integer scale (dst_w = w*n, dst_h = h*m): unrolled replication +
+ *     vertical row memcpy. Avoids per-pixel lookup tables.
+ *   - Generic: xmap lookup. */
+static void upscale_nearest(const void *src, int w, int h, int pitch_bytes) {
+    if (!g_near_buf) return;
+
+    int dst_w, dst_h;
+    if (g_aspect_num > 0 && g_aspect_den > 0) {
+        /* Integer scale preferring largest factor that still fits */
+        int my = HW_H / h;
+        if (my < 1) my = 1;
+        int dw = w * my;
+        if (dw > HW_W) {
+            /* Width-limited: pick scale by width instead */
+            my = HW_W / w; if (my < 1) my = 1;
+            dw = w * my;
         }
+        dst_h = h * my;
+        dst_w = dw;
+    } else {
+        /* Full stretch: integer-snap to 1280×720 if possible */
+        int mx = HW_W / w; if (mx < 1) mx = 1;
+        int my = HW_H / h; if (my < 1) my = 1;
+        dst_w = w * mx; dst_h = h * my;
+    }
+    int off_x = (HW_W - dst_w) / 2;
+    int off_y = (HW_H - dst_h) / 2;
+    if (off_x < 0) off_x = 0;
+    if (off_y < 0) off_y = 0;
+
+    /* Clear borders only when geometry changes */
+    static int last_dst_w = -1, last_dst_h = -1;
+    if (dst_w != last_dst_w || dst_h != last_dst_h) {
+        memset(g_near_buf, 0, HW_BUFSZ);
+        last_dst_w = dst_w; last_dst_h = dst_h;
+    }
+
+    const int sp = pitch_bytes / 2;
+    const uint16_t *s = (const uint16_t *)src;
+    const int nx = dst_w / w;    /* H replication factor (integer) */
+    const int ny = dst_h / h;    /* V replication factor (integer) */
+
+    /* Integer-scale fast path: expand one row, copy ny times. */
+    if (nx >= 1 && ny >= 1 && nx * w == dst_w && ny * h == dst_h) {
+        const int row_bytes = dst_w * 2;
+        for (int sy = 0; sy < h; sy++) {
+            const uint16_t *srow = s + sy * sp;
+            uint16_t *drow = g_near_buf + (size_t)(sy * ny + off_y) * HW_W + off_x;
+            /* Expand horizontally: each src pixel → nx dst pixels */
+            if (nx == 1) {
+                memcpy(drow, srow, (size_t)w * 2);
+            } else if (nx == 2) {
+                for (int sx = 0; sx < w; sx++) {
+                    uint16_t p = srow[sx];
+                    drow[sx*2+0] = p; drow[sx*2+1] = p;
+                }
+            } else if (nx == 3) {
+                for (int sx = 0; sx < w; sx++) {
+                    uint16_t p = srow[sx];
+                    drow[sx*3+0] = p; drow[sx*3+1] = p; drow[sx*3+2] = p;
+                }
+            } else if (nx == 4) {
+                for (int sx = 0; sx < w; sx++) {
+                    uint16_t p = srow[sx];
+                    drow[sx*4+0] = p; drow[sx*4+1] = p;
+                    drow[sx*4+2] = p; drow[sx*4+3] = p;
+                }
+            } else {
+                for (int sx = 0; sx < w; sx++) {
+                    uint16_t p = srow[sx];
+                    uint16_t *dp = drow + sx * nx;
+                    for (int k = 0; k < nx; k++) dp[k] = p;
+                }
+            }
+            /* Vertical replication: copy this row (ny-1) more times */
+            for (int v = 1; v < ny; v++)
+                memcpy(drow + (size_t)v * HW_W, drow, row_bytes);
+        }
+        return;
+    }
+
+    /* Generic fallback: xmap lookup */
+    static int xmap[HW_W];
+    static int last_w_map = -1, last_dst_w_map = -1;
+    if (w != last_w_map || dst_w != last_dst_w_map) {
+        for (int dx = 0; dx < dst_w; dx++) xmap[dx] = dx * w / dst_w;
+        last_w_map = w; last_dst_w_map = dst_w;
+    }
+    for (int dy = 0; dy < dst_h; dy++) {
+        int sy = dy * h / dst_h;
+        const uint16_t *srow = s + sy * sp;
+        uint16_t *drow = g_near_buf + (size_t)(dy + off_y) * HW_W + off_x;
+        for (int dx = 0; dx < dst_w; dx++)
+            drow[dx] = srow[xmap[dx]];
     }
 }
 
 void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
     if (!g_active || !p_disp || !src) return;
-    /* Try direct HW scale: pass source as-is. Driver may accept arbitrary sizes.
-     * If it doesn't, fall back to SW upscale to 1280×720. */
-    p_disp((void *)src, w, h, pitch_bytes);
-    (void)g_dst; (void)upscale_to_hw;
+
+    /* Nearest filter: SW upscale to 1280×720, driver does no further scale. */
+    if (g_filter_nearest) {
+        if (!g_near_buf) {
+            g_near_buf = (uint16_t*)malloc(HW_BUFSZ);
+            if (g_near_buf) memset(g_near_buf, 0, HW_BUFSZ);
+        }
+        if (g_near_buf) {
+            upscale_nearest(src, w, h, pitch_bytes);
+            p_disp(g_near_buf, HW_W, HW_H, HW_PITCH);
+            return;
+        }
+        /* Fallthrough to HW path if alloc failed */
+    }
+
+    /* HW (bilinear) path: pass through, optional aspect pad. */
+    if (g_aspect_num <= 0 || g_aspect_den <= 0) {
+        p_disp((void *)src, w, h, pitch_bytes);
+        return;
+    }
+
+    int pad_w = h * g_aspect_num / g_aspect_den;
+    if (pad_w <= w) {
+        p_disp((void *)src, w, h, pitch_bytes);
+        return;
+    }
+
+    pad_horizontal(src, w, h, pitch_bytes, pad_w);
+    if (!g_pad_buf) {
+        p_disp((void *)src, w, h, pitch_bytes);
+        return;
+    }
+    p_disp(g_pad_buf, pad_w, h, pad_w * 2);
 }
 
 void hwdisp_deinit(void) {
     if (!g_active) return;
     if (p_deinit) p_deinit();
-    if (g_dst)    { free(g_dst); g_dst = NULL; }
+    if (g_pad_buf) { free(g_pad_buf); g_pad_buf = NULL; g_pad_cap = 0; g_pad_w = 0; g_pad_h = 0; }
+    if (g_near_buf) { free(g_near_buf); g_near_buf = NULL; }
     if (g_handle) { dlclose(g_handle); g_handle = NULL; }
     p_init = NULL; p_deinit = NULL; p_disp = NULL;
     g_active = 0;

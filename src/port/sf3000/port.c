@@ -141,6 +141,12 @@ static int display_init(void) {
         return -1;
     }
     use_hwdisp = 1;
+    /* Aspect-correct mode pads source to panel 16:9 for uniform HW stretch.
+     * scale_mode==1 → stretch (no padding). */
+    if (scale_mode == 1) hwdisp_set_target_aspect(0, 0);
+    else                 hwdisp_set_target_aspect(16, 9);
+    /* scale_filter: 0=nearest (SW upscale to 1280×720), 1=bilinear (HW) */
+    hwdisp_set_filter(scale_filter == 0 ? 1 : 0);
     plog("display_init: HW path active");
     fprintf(stderr, "display_init: HW path active\n");
     return 0;
@@ -385,8 +391,16 @@ static void sf3000_menu(void) {
         if (b) return;
         /* LEFT/RIGHT toggles scale/filter items */
         if (lt || rt) {
-            if (sel == 3) { scale_mode   = (scale_mode   + 1) % 2; last_fb_y_off = -1; last_fb_y_len = -1; last_h_blend = -1; }
-            if (sel == 4) { scale_filter = (scale_filter + 1) % 2; last_h_blend = -1; }
+            if (sel == 3) {
+                scale_mode = (scale_mode + 1) % 2;
+                last_fb_y_off = -1; last_fb_y_len = -1; last_h_blend = -1;
+                hwdisp_set_target_aspect(scale_mode == 1 ? 0 : 16, scale_mode == 1 ? 0 : 9);
+            }
+            if (sel == 4) {
+                scale_filter = (scale_filter + 1) % 2;
+                last_h_blend = -1;
+                hwdisp_set_filter(scale_filter == 0 ? 1 : 0);
+            }
         }
         if (a) {
             switch (sel) {
@@ -396,10 +410,12 @@ static void sf3000_menu(void) {
                 case 3:
                     scale_mode = (scale_mode + 1) % 2;
                     last_fb_y_off = -1; last_fb_y_len = -1; last_h_blend = -1;
+                    hwdisp_set_target_aspect(scale_mode == 1 ? 0 : 16, scale_mode == 1 ? 0 : 9);
                     break;
                 case 4:
                     scale_filter = (scale_filter + 1) % 2;
                     last_h_blend = -1;
+                    hwdisp_set_filter(scale_filter == 0 ? 1 : 0);
                     break;
                 case 5: {
                     extern int GameMenu(void);
