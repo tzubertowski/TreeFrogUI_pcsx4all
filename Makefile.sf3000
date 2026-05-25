@@ -44,7 +44,7 @@ endif
 LDFLAGS = -mips32r2 -mhard-float -mfp32 -EL \
           --sysroot=$(SYSROOT) \
           -L$(SYSROOT)/usr/lib \
-          -lc -lgcc -lm -lpthread -lrt -lz \
+          -lc -lgcc -lm -lpthread -lrt -lz -ldl \
           -Wl,--as-needed -Wl,--gc-sections
 
 OBJDIRS = obj obj/gpu obj/gpu/$(GPU) obj/gpu/gpulib obj/spu obj/spu/$(SPU) \
@@ -80,7 +80,7 @@ OBJS += obj/recompiler/mips/recompiler.o \
         obj/recompiler/mips/mips_codegen.o \
         obj/recompiler/mips/mips_disasm.o
 
-OBJS += obj/port/$(PORT)/port.o obj/port/$(PORT)/fonts.o
+OBJS += obj/port/$(PORT)/port.o obj/port/$(PORT)/fonts.o obj/port/$(PORT)/hwdisp.o
 OBJS += obj/port/common/frontend.o obj/port/common/cdrom_hacks.o
 OBJS += obj/plugin_lib/perfmon.o obj/plugin_lib/plugin_lib.o \
         obj/plugin_lib/pl_sshot.o
@@ -95,6 +95,7 @@ $(TARGET): $(OBJS)
 obj/%.o: src/%.c
 	@echo "CC $<"
 	$(CC) $(CFLAGS) -c -o $@ $<
+
 
 obj/%.o: src/%.cpp
 	@echo "CXX $<"

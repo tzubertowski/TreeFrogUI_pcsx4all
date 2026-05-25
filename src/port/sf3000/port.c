@@ -30,6 +30,7 @@
 #include "perfmon.h"
 #include "cdrom_hacks.h"
 #include "cheat.h"
+#include "hwdisp.h"
 
 #ifdef SPU_PCSXREARMED
   #include "spu/spu_pcsxrearmed/spu_config.h"
@@ -44,6 +45,8 @@
   extern u32 cycle_multiplier;
 #endif
 
+static void plog(const char *msg);
+
 uint8_t use_speedup = 0;
 void update_window_size(int w, int h) {
     if (w == SCREEN_WIDTH && h == SCREEN_HEIGHT) return;
@@ -56,6 +59,7 @@ void update_window_size(int w, int h) {
 /* --------------------------------------------------------------------------
  * Display state
  * -------------------------------------------------------------------------- */
+static int          dis_fd  = -1;
 static int          fb_fd   = -1;
 static uint32_t    *fb_mem  = NULL;
 static size_t       fb_size = 0;
@@ -71,18 +75,19 @@ static int          current_page = 0;
 
 static uint16_t *rotated_buf    = NULL;
 static int       rotated_cap    = 0;
-static int       last_gh        = -1;
-static int       last_disp_h    = -1;
 static int       last_fb_y_off  = -1;
 static int       last_fb_y_len  = -1;
 
 struct blend_data { int16_t gy1, gy2; uint8_t w1, w2; };
 static struct blend_data blend_lut[FB_X_VIS];
+static int last_h_blend = -1;
 
 unsigned short *SCREEN        = NULL;
 int             SCREEN_WIDTH  = 320;
 int             SCREEN_HEIGHT = 240;
 int             scale_mode    = 0;   /* 0=aspect-correct, 1=fullscreen */
+int             scale_filter  = 0;   /* 0=nearest, 1=bilinear */
+int             use_hwdisp    = 0;   /* 0=software path, 1=HW via driver.so */
 
 /* RGB565 → ARGB8888 with full 8-bit channel expansion */
 static inline uint32_t cvt565(uint16_t c) {
@@ -93,11 +98,10 @@ static inline uint32_t cvt565(uint16_t c) {
 }
 
 static void dis_assert(void) {
-    int dis = open("/dev/dis", O_RDWR);
-    if (dis >= 0) {
+    if (dis_fd < 0) dis_fd = open("/dev/dis", O_RDWR);
+    if (dis_fd >= 0) {
         struct { int a, b, c; } buf = {1, 0, 0};
-        ioctl(dis, 0xc00c0e0c, &buf);
-        close(dis);
+        ioctl(dis_fd, 0xc00c0e0c, &buf);
     }
 }
 
@@ -129,16 +133,31 @@ static int display_init(void) {
     SCREEN       = calloc(SCREEN_WIDTH * SCREEN_HEIGHT, 2);
     SCREEN_WIDTH  = 320;
     SCREEN_HEIGHT = 240;
+
+    /* HW display via driver.so. Fail loudly if unavailable. */
+    if (hwdisp_init() != 0) {
+        plog("display_init: hwdisp_init FAILED");
+        fprintf(stderr, "display_init: hwdisp_init FAILED — aborting\n");
+        return -1;
+    }
+    use_hwdisp = 1;
+    plog("display_init: HW path active");
+    fprintf(stderr, "display_init: HW path active\n");
     return 0;
 }
 
 static void display_blit(const void *src, int w, int h, int pitch) {
+    if (use_hwdisp) {
+        hwdisp_present(src, w, h, pitch);
+        return;
+    }
     dis_assert();
     if (!fb_mem || !src) return;
 
     const int dst_stride = (int)(finfo.line_length / 4);
 
-    /* Rotate: transpose src (w×h) → rotated_buf (h×w) */
+    /* Transpose src(w×h) → rotated_buf(h×w) column-major.
+       gy-outer/gx-inner: reads are sequential (row[gx]), writes are strided. */
     if (w * h > rotated_cap) {
         free(rotated_buf);
         rotated_cap = w * h + 4096;
@@ -151,26 +170,27 @@ static void display_blit(const void *src, int w, int h, int pitch) {
             rotated_buf[gx * h + gy] = row[gx];
     }
 
-    /* Rebuild vertical blend LUT — always fill full height */
-    if (h != last_gh || h != last_disp_h) {
-        int fb_x_len = FB_X_VIS;
-        int fb_x_off = 0;
+    /* Nearest-neighbor LUT: gy[fx] = source row for output column fx */
+    static int16_t gy_lut[FB_X_VIS];
+    static int last_h_lut = -1;
+    if (h != last_h_lut) {
+        for (int fx = 0; fx < FB_X_VIS; fx++)
+            gy_lut[fx] = (int16_t)((FB_X_VIS - 1 - fx) * h / FB_X_VIS);
+        last_h_lut = h;
+    }
+
+    /* Bilinear blend LUT (rebuilt when h changes) */
+    extern int scale_filter;
+    if (scale_filter && h != last_h_blend) {
         for (int fx = 0; fx < FB_X_VIS; fx++) {
-            if (fx < fb_x_off || fx >= fb_x_off + fb_x_len) {
-                blend_lut[fx].gy1 = -1;
-                blend_lut[fx].w2  = 0;
-            } else {
-                int ax = fx - fb_x_off;
-                int gf = ((fb_x_len - 1 - ax) * h * 256) / fb_x_len;
-                int gy = gf >> 8;
-                blend_lut[fx].gy1 = gy;
-                blend_lut[fx].gy2 = (gy + 1 < h) ? (gy + 1) : gy;
-                blend_lut[fx].w2  = (gf & 0xFF) >> 1;
-                blend_lut[fx].w1  = 128 - blend_lut[fx].w2;
-            }
+            int gf = ((FB_X_VIS - 1 - fx) * h * 256) / FB_X_VIS;
+            int gy = gf >> 8;
+            blend_lut[fx].gy1 = (int16_t)gy;
+            blend_lut[fx].gy2 = (int16_t)((gy + 1 < h) ? gy + 1 : gy);
+            blend_lut[fx].w2  = (uint8_t)((gf & 0xFF) >> 1);
+            blend_lut[fx].w1  = (uint8_t)(128 - blend_lut[fx].w2);
         }
-        last_gh     = h;
-        last_disp_h = h;
+        last_h_blend = h;
     }
 
     /* Scale mode: 0=aspect-correct, 1=fullscreen-stretch */
@@ -209,22 +229,25 @@ static void display_blit(const void *src, int w, int h, int pitch) {
             count++;
 
         const uint16_t *col = rotated_buf + gx * h;
-        for (int fx = 0; fx < FB_X_VIS; fx++) {
-            int gy1 = blend_lut[fx].gy1;
-            if (gy1 < 0) { row_cache[fx] = 0xFF000000u; continue; }
-            int gy2 = blend_lut[fx].gy2;
-            uint16_t p1 = col[gy1];
-            if (blend_lut[fx].w2 == 0 || gy1 == gy2) {
-                row_cache[fx] = cvt565(p1);
-            } else {
-                uint16_t p2 = col[gy2];
-                if (p1 == p2) { row_cache[fx] = cvt565(p1); }
-                else {
-                    uint32_t c1 = cvt565(p1), c2 = cvt565(p2);
-                    uint32_t w1 = blend_lut[fx].w1, w2 = blend_lut[fx].w2;
-                    uint32_t rb = (((c1&0xFF00FF)*w1 + (c2&0xFF00FF)*w2) >> 7) & 0xFF00FF;
-                    uint32_t g  = (((c1&0x00FF00)*w1 + (c2&0x00FF00)*w2) >> 7) & 0x00FF00;
-                    row_cache[fx] = 0xFF000000u | rb | g;
+        if (!scale_filter) {
+            for (int fx = 0; fx < FB_X_VIS; fx++)
+                row_cache[fx] = cvt565(col[gy_lut[fx]]);
+        } else {
+            for (int fx = 0; fx < FB_X_VIS; fx++) {
+                uint16_t p1 = col[blend_lut[fx].gy1];
+                if (blend_lut[fx].w2 == 0) {
+                    row_cache[fx] = cvt565(p1);
+                } else {
+                    uint16_t p2 = col[blend_lut[fx].gy2];
+                    if (p1 == p2) {
+                        row_cache[fx] = cvt565(p1);
+                    } else {
+                        uint32_t c1 = cvt565(p1), c2 = cvt565(p2);
+                        uint32_t w1 = blend_lut[fx].w1, w2 = blend_lut[fx].w2;
+                        uint32_t rb = (((c1&0xFF00FF)*w1+(c2&0xFF00FF)*w2)>>7)&0xFF00FF;
+                        uint32_t g  = (((c1&0x00FF00)*w1+(c2&0x00FF00)*w2)>>7)&0x00FF00;
+                        row_cache[fx] = 0xFF000000u | rb | g;
+                    }
                 }
             }
         }
@@ -242,31 +265,17 @@ static void display_blit(const void *src, int w, int h, int pitch) {
         fb_y += count;
     }
 
-    /* Page flip */
+    /* Page flip — timing handled by pl_frame_limit() in EmuUpdate() */
     struct fb_var_screeninfo vi = vinfo;
     vi.xoffset = 0; vi.yoffset = page_y;
     ioctl(fb_fd, FBIOPAN_DISPLAY, &vi);
-
-    /* Frame timing: target 16666 µs (60 fps) */
-    static struct timeval last_tv = {0,0};
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    if (last_tv.tv_sec) {
-        long long diff = (tv.tv_sec - last_tv.tv_sec)*1000000LL
-                       + (tv.tv_usec - last_tv.tv_usec);
-        if (diff > 0 && diff < 16666) {
-            long long sl = 16666 - diff;
-            if (sl > 2000) usleep(sl - 2000);
-            do { gettimeofday(&tv, NULL);
-                 diff = (tv.tv_sec-last_tv.tv_sec)*1000000LL
-                       +(tv.tv_usec-last_tv.tv_usec);
-            } while (diff < 16666);
-        }
-    }
-    last_tv = tv;
 }
 
 static void shutdown_display(void) {
+    if (use_hwdisp) {
+        hwdisp_deinit();
+        use_hwdisp = 0;
+    }
     if (fb_fd >= 0) {
         struct fb_var_screeninfo vi = vinfo;
         vi.xoffset = 0; vi.yoffset = 0;
@@ -274,6 +283,7 @@ static void shutdown_display(void) {
         if (fb_mem && fb_mem != MAP_FAILED) { munmap(fb_mem, fb_size); fb_mem = NULL; }
         close(fb_fd); fb_fd = -1;
     }
+    if (dis_fd >= 0) { close(dis_fd); dis_fd = -1; }
 }
 
 /* --------------------------------------------------------------------------
@@ -330,15 +340,18 @@ static void sf3000_menu(void) {
     uint32_t prev = cv_keys ? *cv_keys : 0;
 
     while (1) {
-        char scale_label[48];
-        snprintf(scale_label, sizeof(scale_label), "Scale: %s",
+        char scale_label[48], filter_label[48];
+        snprintf(scale_label,  sizeof(scale_label),  "Scale:  %s",
                  scale_mode == 1 ? "Fullscreen" : "Aspect-Correct");
+        snprintf(filter_label, sizeof(filter_label), "Filter: %s",
+                 scale_filter == 1 ? "Bilinear" : "Nearest");
 
         const char *items[] = {
             "Resume",
             "Save State (slot 1)",
             "Load State (slot 1)",
             scale_label,
+            filter_label,
             "PCSX Settings",
             "Exit to FrogUI",
             NULL
@@ -370,10 +383,10 @@ static void sf3000_menu(void) {
         if (up && sel > 0)   sel--;
         if (dn && sel < n-1) sel++;
         if (b) return;
-        /* LEFT/RIGHT toggles the current item directly (same as A for toggles) */
-        if ((lt || rt) && sel == 3) {
-            scale_mode = (scale_mode + 1) % 2;
-            last_fb_y_off = -1; last_fb_y_len = -1;
+        /* LEFT/RIGHT toggles scale/filter items */
+        if (lt || rt) {
+            if (sel == 3) { scale_mode   = (scale_mode   + 1) % 2; last_fb_y_off = -1; last_fb_y_len = -1; last_h_blend = -1; }
+            if (sel == 4) { scale_filter = (scale_filter + 1) % 2; last_h_blend = -1; }
         }
         if (a) {
             switch (sel) {
@@ -382,9 +395,13 @@ static void sf3000_menu(void) {
                 case 2: state_load(1); usleep(300000); return;
                 case 3:
                     scale_mode = (scale_mode + 1) % 2;
-                    last_fb_y_off = -1; last_fb_y_len = -1;
+                    last_fb_y_off = -1; last_fb_y_len = -1; last_h_blend = -1;
                     break;
-                case 4: {
+                case 4:
+                    scale_filter = (scale_filter + 1) % 2;
+                    last_h_blend = -1;
+                    break;
+                case 5: {
                     extern int GameMenu(void);
                     extern void sdl_poll_reset(void);
                     while (cv_keys && btn(*cv_keys, CV_A)) usleep(10000);
@@ -394,7 +411,7 @@ static void sf3000_menu(void) {
                     last_fb_y_off = -1; last_fb_y_len = -1;
                     break;
                 }
-                case 5: config_save(); exit(0);
+                case 6: config_save(); exit(0);
             }
         }
     }
@@ -600,7 +617,8 @@ void config_load(void) {
         else if (!strcmp(line,"SpuUseReverb"))        spu_config.iUseReverb = v;
         else if (!strcmp(line,"SpuVolume"))           spu_config.iVolume = v;
 #endif
-        else if (!strcmp(line,"ScaleMode")) scale_mode = v;
+        else if (!strcmp(line,"ScaleMode"))   scale_mode   = v;
+        else if (!strcmp(line,"ScaleFilter")) scale_filter = v;
     }
     fclose(f);
 }
@@ -634,7 +652,7 @@ void config_save(void) {
     fprintf(f, "SpuUseInterpolation %d\nSpuUseReverb %d\nSpuVolume %d\n",
             spu_config.iUseInterpolation, spu_config.iUseReverb, spu_config.iVolume);
 #endif
-    fprintf(f, "ScaleMode %d\n", scale_mode);
+    fprintf(f, "ScaleMode %d\nScaleFilter %d\n", scale_mode, scale_filter);
     if (Config.LastDir[0]) fprintf(f, "LastDir %s\n", Config.LastDir);
     if (Config.BiosDir[0]) fprintf(f, "BiosDir %s\n", Config.BiosDir);
     if (Config.Bios[0])    fprintf(f, "Bios %s\n",    Config.Bios);
@@ -662,19 +680,8 @@ int state_save(int slot) {
 /* --------------------------------------------------------------------------
  * main()
  * -------------------------------------------------------------------------- */
-void plog_pub(const char *msg) {
-    int fd = open("/mnt/sdcard/pcsx4all_boot.log", O_WRONLY|O_CREAT|O_APPEND, 0644);
-    if (fd >= 0) { write(fd, msg, strlen(msg)); write(fd, "\n", 1); close(fd); }
-}
-
-static void plog(const char *msg) {
-    int fd = open("/mnt/sdcard/pcsx4all_boot.log", O_WRONLY|O_CREAT|O_APPEND, 0644);
-    if (fd >= 0) {
-        write(fd, msg, strlen(msg));
-        write(fd, "\n", 1);
-        close(fd);
-    }
-}
+void plog_pub(const char *msg) { (void)msg; }
+static void plog(const char *msg) { (void)msg; }
 
 int main(int argc, char *argv[]) {
     plog("main: start");
@@ -692,9 +699,9 @@ int main(int argc, char *argv[]) {
     strncpy(Config.Bios, "scph1001.bin", sizeof(Config.Bios)-1);
 
 #ifdef GPU_UNAI
-    gpu_unai_config_ext.lighting     = 1;
+    gpu_unai_config_ext.lighting     = 0;
     gpu_unai_config_ext.fast_lighting= 1;
-    gpu_unai_config_ext.blending     = 1;
+    gpu_unai_config_ext.blending     = 0;
     gpu_unai_config_ext.dithering    = 0;
     gpu_unai_config_ext.clip_368     = 0;
 #endif
