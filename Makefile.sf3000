@@ -31,7 +31,7 @@ CFLAGS  = $(C_ARCH) -Ofast -DNDEBUG \
           -DXA_HACK \
           -DINLINE="static __inline__" -Dasm="__asm__ __volatile__" \
           -DMCD1_FILE=$(MCD1_FILE) -DMCD2_FILE=$(MCD2_FILE) \
-          -DCHEAT_UNZIP -DHW_SCALE -DFORCE_MEMCPY32 -DFORCE_FULLSCREEN
+          -DCHEAT_UNZIP -DHW_SCALE -DFORCE_MEMCPY32 -DFORCE_FULLSCREEN -DHAVE_SF3000
 
 CFLAGS += -D$(shell echo $(GPU) | tr a-z A-Z)
 CFLAGS += -D$(shell echo $(SPU) | tr a-z A-Z)
@@ -72,7 +72,8 @@ OBJS += obj/spu/$(SPU)/spu.o \
         obj/spu/$(SPU)/out.o obj/spu/$(SPU)/registers.o \
         obj/spu/$(SPU)/reverb.o \
         obj/spu/$(SPU)/xa.o \
-        obj/spu/$(SPU)/nullsnd.o
+        obj/spu/$(SPU)/nullsnd.o \
+        obj/spu/$(SPU)/out_sf3000.o
 
 OBJS += obj/recompiler/mips/recompiler.o \
         obj/recompiler/mips/host_asm.o \
