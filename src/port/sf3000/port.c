@@ -141,25 +141,80 @@ static int display_init(void) {
         return -1;
     }
     use_hwdisp = 1;
-    /* Aspect-correct mode pads source to panel 16:9 for uniform HW stretch.
-     * scale_mode==1 → stretch (no padding). */
-    if (scale_mode == 1) hwdisp_set_target_aspect(0, 0);
-    else                 hwdisp_set_target_aspect(16, 9);
-    /* scale_filter: 0=nearest (SW upscale to 1280×720), 1=bilinear (HW) */
-    hwdisp_set_filter(scale_filter == 0 ? 1 : 0);
+    /* scale_mode 0 = Aspect-Correct (nearest SW-upscale to 1280×720 with
+     *   16:9 pad — driver does uniform downscale, letterbox bars survive)
+     * scale_mode 1 = Fullscreen (HW bilinear direct, driver stretches per axis)
+     * Driver-side aspect padding alone is not respected — bars get scaled
+     * away. Putting bars into the 1280×720 staging buffer works. */
+    if (scale_mode == 1) {
+        hwdisp_set_target_aspect(0, 0);
+        hwdisp_set_filter(0);
+    } else {
+        hwdisp_set_target_aspect(16, 9);
+        hwdisp_set_filter(1);
+    }
     plog("display_init: HW path active");
     fprintf(stderr, "display_init: HW path active\n");
     return 0;
 }
 
+/* PSX wide-mode aspect normalize: when src width exceeds 4:3-of-height (i.e.
+ * non-square PSX pixels, e.g. 512×240 / 640×240 / 384×240), downsample src
+ * horizontally to 4:3 ratio (320×240 for 640×240). Pass result to driver via
+ * the standard 16:9 pad. Driver then scales 4:3-padded buf uniformly to panel
+ * → correct 4:3 image with pillarbox.
+ *
+ * Cost: one horizontal downsample pass (~150KB/frame for typical src). Much
+ * cheaper than full panel compose; mirrors how libretro cores (pcsx_rearmed)
+ * normalize their output. */
+static void compose_aspect_4to3(const void *src, int w, int h, int pitch) {
+    int target_w = h * 4 / 3;
+    if (target_w >= w) {
+        /* Already 4:3 or narrower (320×240, 256×240): pass directly. */
+        hwdisp_set_target_aspect(16, 9);
+        hwdisp_set_filter(0);
+        hwdisp_present(src, w, h, pitch);
+        return;
+    }
+
+    /* Downsample W → target_w via nearest decimation. */
+    static uint16_t buf[640 * 512];        /* fits up to 640×480 PSX hi-res */
+    static int x_map[640];
+    static int last_w = -1, last_tgt = -1;
+    if (target_w > 640) target_w = 640;
+
+    if (w != last_w || target_w != last_tgt) {
+        for (int dx = 0; dx < target_w; dx++) x_map[dx] = dx * w / target_w;
+        last_w = w; last_tgt = target_w;
+    }
+
+    const uint16_t *s = (const uint16_t *)src;
+    const int sp = pitch / 2;
+    for (int y = 0; y < h && y < 512; y++) {
+        const uint16_t *srow = s + y * sp;
+        uint16_t *drow = buf + y * target_w;
+        for (int dx = 0; dx < target_w; dx++) drow[dx] = srow[x_map[dx]];
+    }
+
+    hwdisp_set_target_aspect(16, 9);
+    hwdisp_set_filter(0);
+    hwdisp_present(buf, target_w, h, target_w * 2);
+}
+
 static void display_blit(const void *src, int w, int h, int pitch) {
     /* Always use HW path: SW fb0 writes are invisible once hwdisp_init has
      * activated HCGE in this process, because per-frame dis_assert() can't
-     * override HCGE display routing on this hardware. hwdisp_set_filter
-     * (set by config) chooses nearest SW-upscale vs HW bilinear inside the
-     * HW path itself. */
+     * override HCGE display routing on this hardware. */
     if (use_hwdisp) {
-        hwdisp_present(src, w, h, pitch);
+        if (scale_mode == 0) {
+            /* Aspect-correct: PSX 4:3 regardless of internal resolution */
+            compose_aspect_4to3(src, w, h, pitch);
+        } else {
+            /* Fullscreen stretch */
+            hwdisp_set_target_aspect(0, 0);
+            hwdisp_set_filter(0);
+            hwdisp_present(src, w, h, pitch);
+        }
         return;
     }
     dis_assert();
@@ -351,18 +406,15 @@ static void sf3000_menu(void) {
     uint32_t prev = cv_keys ? *cv_keys : 0;
 
     while (1) {
-        char scale_label[48], filter_label[48];
+        char scale_label[48];
         snprintf(scale_label,  sizeof(scale_label),  "Scale:  %s",
                  scale_mode == 1 ? "Fullscreen" : "Aspect-Correct");
-        snprintf(filter_label, sizeof(filter_label), "Filter: %s",
-                 scale_filter == 1 ? "Bilinear" : "Nearest");
 
         const char *items[] = {
             "Resume",
             "Save State (slot 1)",
             "Load State (slot 1)",
             scale_label,
-            filter_label,
             "PCSX Settings",
             "Exit to FrogUI",
             NULL
@@ -394,17 +446,16 @@ static void sf3000_menu(void) {
         if (up && sel > 0)   sel--;
         if (dn && sel < n-1) sel++;
         if (b) return;
-        /* LEFT/RIGHT toggles scale/filter items */
+        /* LEFT/RIGHT toggles scale item */
         if (lt || rt) {
             if (sel == 3) {
                 scale_mode = (scale_mode + 1) % 2;
                 last_fb_y_off = -1; last_fb_y_len = -1; last_h_blend = -1;
-                hwdisp_set_target_aspect(scale_mode == 1 ? 0 : 16, scale_mode == 1 ? 0 : 9);
-            }
-            if (sel == 4) {
-                scale_filter = (scale_filter + 1) % 2;
-                last_h_blend = -1;
-                hwdisp_set_filter(scale_filter == 0 ? 1 : 0);
+                if (scale_mode == 1) {
+                    hwdisp_set_target_aspect(0, 0); hwdisp_set_filter(0);
+                } else {
+                    hwdisp_set_target_aspect(16, 9); hwdisp_set_filter(1);
+                }
             }
         }
         if (a) {
@@ -417,12 +468,7 @@ static void sf3000_menu(void) {
                     last_fb_y_off = -1; last_fb_y_len = -1; last_h_blend = -1;
                     hwdisp_set_target_aspect(scale_mode == 1 ? 0 : 16, scale_mode == 1 ? 0 : 9);
                     break;
-                case 4:
-                    scale_filter = (scale_filter + 1) % 2;
-                    last_h_blend = -1;
-                    hwdisp_set_filter(scale_filter == 0 ? 1 : 0);
-                    break;
-                case 5: {
+                case 4: {
                     extern int GameMenu(void);
                     extern void sdl_poll_reset(void);
                     while (cv_keys && btn(*cv_keys, CV_A)) usleep(10000);
@@ -432,7 +478,7 @@ static void sf3000_menu(void) {
                     last_fb_y_off = -1; last_fb_y_len = -1;
                     break;
                 }
-                case 6: config_save(); exit(0);
+                case 5: config_save(); exit(0);
             }
         }
     }
