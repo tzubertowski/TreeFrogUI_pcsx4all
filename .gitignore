@@ -1,0 +1,17 @@
+*.o
+obj
+*.swp
+pcsx4all*
+stdin.txt
+stdout.txt
+*.mcr
+*.iso
+*.bin
+*.img
+*.diff
+*.sh
+!build_sf3000.sh
+*.bat
+err.txt
+*.ipk
+*.cue

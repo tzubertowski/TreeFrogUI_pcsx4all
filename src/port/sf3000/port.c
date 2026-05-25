@@ -86,7 +86,7 @@ unsigned short *SCREEN        = NULL;
 int             SCREEN_WIDTH  = 320;
 int             SCREEN_HEIGHT = 240;
 int             scale_mode    = 0;   /* 0=aspect-correct, 1=fullscreen */
-int             scale_filter  = 0;   /* 0=nearest, 1=bilinear */
+int             scale_filter  = 1;   /* 0=nearest (SW fb0 — broken on this HW), 1=bilinear (HW HCGE) */
 int             use_hwdisp    = 0;   /* 0=software path, 1=HW via driver.so */
 
 /* RGB565 → ARGB8888 with full 8-bit channel expansion */
@@ -153,9 +153,12 @@ static int display_init(void) {
 }
 
 static void display_blit(const void *src, int w, int h, int pitch) {
-    /* HW path only for bilinear filter. Nearest uses SW direct-to-fb below
-     * (no DMA round-trip). */
-    if (use_hwdisp && scale_filter == 1) {
+    /* Always use HW path: SW fb0 writes are invisible once hwdisp_init has
+     * activated HCGE in this process, because per-frame dis_assert() can't
+     * override HCGE display routing on this hardware. hwdisp_set_filter
+     * (set by config) chooses nearest SW-upscale vs HW bilinear inside the
+     * HW path itself. */
+    if (use_hwdisp) {
         hwdisp_present(src, w, h, pitch);
         return;
     }
