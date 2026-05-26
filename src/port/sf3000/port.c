@@ -383,8 +383,8 @@ static void shutdown_display(void) {
 #define CV_RIGHT  5
 #define CV_A     13   /* Cross    */
 #define CV_B     14   /* Circle   */
-#define CV_X     12   /* Triangle */
-#define CV_Y     15   /* Square   */
+#define CV_X     12   /* Square   */
+#define CV_Y     15   /* Triangle */
 #define CV_L     10
 #define CV_R     11
 #define CV_SEL    0
@@ -579,8 +579,8 @@ void pad_update(void) {
     if (btn(k, CV_RIGHT)) p &= ~PSX_RIGHT;
     if (btn(k, CV_A))     p &= ~PSX_CROSS;
     if (btn(k, CV_B))     p &= ~PSX_CIRCLE;
-    if (btn(k, CV_X))     p &= ~PSX_TRIANGLE;
-    if (btn(k, CV_Y))     p &= ~PSX_SQUARE;
+    if (btn(k, CV_X))     p &= ~PSX_SQUARE;
+    if (btn(k, CV_Y))     p &= ~PSX_TRIANGLE;
     if (btn(k, CV_L))     p &= ~PSX_L1;
     if (btn(k, CV_R))     p &= ~PSX_R1;
     if (btn(k, CV_SEL))   p &= ~PSX_SELECT;
