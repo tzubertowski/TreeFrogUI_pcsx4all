@@ -105,6 +105,26 @@ static void dis_assert(void) {
     }
 }
 
+/* OSD overlay (battery, volume) is drawn by cubevol on /dev/fb1 (ARGB plane).
+ * Hide: memset fb1 to zero (alpha=0 → invisible). cubevol has no signal
+ *       handler so it won't redraw on its own.
+ * Show: restart cubevol via killall + spawn; new instance draws OSD on init. */
+#include <sys/mman.h>
+#include <linux/fb.h>
+#include <stdlib.h>
+static void fb1_clear(void) {
+    int fd = open("/dev/fb1", O_RDWR);
+    if (fd < 0) return;
+    struct fb_fix_screeninfo finfo;
+    if (ioctl(fd, FBIOGET_FSCREENINFO, &finfo) == 0 && finfo.smem_len > 0) {
+        void *mem = mmap(NULL, finfo.smem_len, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+        if (mem != MAP_FAILED) { memset(mem, 0, finfo.smem_len); munmap(mem, finfo.smem_len); }
+    }
+    close(fd);
+}
+/* Only FrogUI restores OSD on its own init. pcsx4all keeps fb1 cleared. */
+static void fb1_blank(int blank) { if (blank) fb1_clear(); }
+
 static int display_init(void) {
     dis_assert();
 
@@ -141,6 +161,7 @@ static int display_init(void) {
         return -1;
     }
     use_hwdisp = 1;
+    fb1_blank(1);   /* hide battery/volume OSD during gameplay */
     /* scale_mode 0 = Aspect-Correct (nearest SW-upscale to 1280×720 with
      *   16:9 pad — driver does uniform downscale, letterbox bars survive)
      * scale_mode 1 = Fullscreen (HW bilinear direct, driver stretches per axis)
@@ -338,6 +359,7 @@ static void display_blit(const void *src, int w, int h, int pitch) {
 }
 
 static void shutdown_display(void) {
+    fb1_blank(0);   /* restore OSD on exit so FrogUI shows battery */
     if (use_hwdisp) {
         hwdisp_deinit();
         use_hwdisp = 0;
@@ -404,6 +426,7 @@ void config_save(void);
 static void sf3000_menu(void) {
     int sel = 0;
     uint32_t prev = cv_keys ? *cv_keys : 0;
+    fb1_blank(0);   /* show battery while in pause menu */
 
     while (1) {
         char scale_label[48];
@@ -445,7 +468,7 @@ static void sf3000_menu(void) {
 
         if (up && sel > 0)   sel--;
         if (dn && sel < n-1) sel++;
-        if (b) return;
+        if (b) { fb1_blank(1); return; }
         /* LEFT/RIGHT toggles scale item */
         if (lt || rt) {
             if (sel == 3) {
@@ -460,9 +483,9 @@ static void sf3000_menu(void) {
         }
         if (a) {
             switch (sel) {
-                case 0: return;
-                case 1: state_save(1); usleep(300000); return;
-                case 2: state_load(1); usleep(300000); return;
+                case 0: fb1_blank(1); return;
+                case 1: state_save(1); usleep(300000); fb1_blank(1); return;
+                case 2: state_load(1); usleep(300000); fb1_blank(1); return;
                 case 3:
                     scale_mode = (scale_mode + 1) % 2;
                     last_fb_y_off = -1; last_fb_y_len = -1; last_h_blend = -1;
