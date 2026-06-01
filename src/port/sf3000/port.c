@@ -20,6 +20,7 @@
 #include <sys/shm.h>
 #include <linux/fb.h>
 #include <time.h>
+#include <math.h>
 #include <dirent.h>
 
 #include "SDL.h"
@@ -88,6 +89,37 @@ int             SCREEN_HEIGHT = 240;
 int             scale_mode    = 0;   /* 0=aspect-correct, 1=fullscreen */
 int             scale_filter  = 1;   /* 0=nearest (SW fb0 — broken on this HW), 1=bilinear (HW HCGE) */
 int             use_hwdisp    = 0;   /* 0=software path, 1=HW via driver.so */
+
+/* Gamma / black-lift: 100 = off (linear). >100 lifts crushed blacks (PS1
+ * true-black games unreadable on this panel). Applied to SCREEN (RGB565) just
+ * before blit. Safe in-place: vout re-copies the whole visible area from VRAM
+ * every frame, so the LUT never accumulates. */
+int             gamma_percent = 100;
+static uint8_t  glut5[32], glut6[64];
+static int      glut_built_for = -1;
+static void gamma_build_lut(void) {
+    if (glut_built_for == gamma_percent) return;
+    double g = gamma_percent / 100.0;            /* >1 brightens shadows */
+    for (int i = 0; i < 32; i++) {
+        int v = (int)(pow(i / 31.0, 1.0 / g) * 31.0 + 0.5);
+        glut5[i] = v > 31 ? 31 : v;
+    }
+    for (int i = 0; i < 64; i++) {
+        int v = (int)(pow(i / 63.0, 1.0 / g) * 63.0 + 0.5);
+        glut6[i] = v > 63 ? 63 : v;
+    }
+    glut_built_for = gamma_percent;
+}
+static void gamma_apply(uint16_t *px, int count) {
+    if (gamma_percent <= 100 || !px) return;
+    gamma_build_lut();
+    for (int i = 0; i < count; i++) {
+        uint16_t p = px[i];
+        px[i] = (glut5[(p >> 11) & 31] << 11)
+              | (glut6[(p >>  5) & 63] <<  5)
+              |  glut5[ p        & 31];
+    }
+}
 
 /* RGB565 → ARGB8888 with full 8-bit channel expansion */
 static inline uint32_t cvt565(uint16_t c) {
@@ -432,12 +464,19 @@ static void sf3000_menu(void) {
         char scale_label[48];
         snprintf(scale_label,  sizeof(scale_label),  "Scale:  %s",
                  scale_mode == 1 ? "Fullscreen" : "Aspect-Correct");
+        char gamma_label[48];
+        if (gamma_percent <= 100)
+            snprintf(gamma_label, sizeof(gamma_label), "Gamma:  Off");
+        else
+            snprintf(gamma_label, sizeof(gamma_label), "Gamma:  %d.%02d",
+                     gamma_percent / 100, gamma_percent % 100);
 
         const char *items[] = {
             "Resume",
             "Save State (slot 1)",
             "Load State (slot 1)",
             scale_label,
+            gamma_label,
             "PCSX Settings",
             "Exit to FrogUI",
             NULL
@@ -469,7 +508,7 @@ static void sf3000_menu(void) {
         if (up && sel > 0)   sel--;
         if (dn && sel < n-1) sel++;
         if (b) { fb1_blank(1); return; }
-        /* LEFT/RIGHT toggles scale item */
+        /* LEFT/RIGHT adjusts scale (sel 3) and gamma (sel 4) */
         if (lt || rt) {
             if (sel == 3) {
                 scale_mode = (scale_mode + 1) % 2;
@@ -479,6 +518,10 @@ static void sf3000_menu(void) {
                 } else {
                     hwdisp_set_target_aspect(16, 9); hwdisp_set_filter(1);
                 }
+            } else if (sel == 4) {
+                gamma_percent += rt ? 10 : -10;
+                if (gamma_percent < 100) gamma_percent = 100;
+                if (gamma_percent > 250) gamma_percent = 250;
             }
         }
         if (a) {
@@ -491,7 +534,10 @@ static void sf3000_menu(void) {
                     last_fb_y_off = -1; last_fb_y_len = -1; last_h_blend = -1;
                     hwdisp_set_target_aspect(scale_mode == 1 ? 0 : 16, scale_mode == 1 ? 0 : 9);
                     break;
-                case 4: {
+                case 4: /* gamma: A toggles off/default */
+                    gamma_percent = (gamma_percent > 100) ? 100 : 130;
+                    break;
+                case 5: {
                     extern int GameMenu(void);
                     extern void sdl_poll_reset(void);
                     while (cv_keys && btn(*cv_keys, CV_A)) usleep(10000);
@@ -501,7 +547,7 @@ static void sf3000_menu(void) {
                     last_fb_y_off = -1; last_fb_y_len = -1;
                     break;
                 }
-                case 5: config_save(); exit(0);
+                case 6: config_save(); exit(0);
             }
         }
     }
@@ -595,6 +641,7 @@ uint16_t pad_read(int num) { return (num == 0 ? pad1 : 0xFFFF); }
  * -------------------------------------------------------------------------- */
 void video_flip(void) {
     if (Config.ShowFps) port_printf(2, 2, pl_data.stats_msg);
+    gamma_apply(SCREEN, SCREEN_WIDTH * SCREEN_HEIGHT);
     display_blit(SCREEN, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH * 2);
 }
 
@@ -701,6 +748,8 @@ void config_load(void) {
         else if (!strcmp(line,"blending"))      gpu_unai_config_ext.blending = v;
         else if (!strcmp(line,"dithering"))     gpu_unai_config_ext.dithering = v;
         else if (!strcmp(line,"clip_368"))      gpu_unai_config_ext.clip_368 = v;
+        else if (!strcmp(line,"pixel_skip"))    gpu_unai_config_ext.pixel_skip = v;
+        else if (!strcmp(line,"ilace_force"))   gpu_unai_config_ext.ilace_force = v;
 #endif
 #ifdef SPU_PCSXREARMED
         else if (!strcmp(line,"SpuUseInterpolation")) spu_config.iUseInterpolation = v;
@@ -709,6 +758,7 @@ void config_load(void) {
 #endif
         else if (!strcmp(line,"ScaleMode"))   scale_mode   = v;
         else if (!strcmp(line,"ScaleFilter")) scale_filter = v;
+        else if (!strcmp(line,"Gamma"))       gamma_percent = (v < 100 ? 100 : (v > 250 ? 250 : v));
     }
     fclose(f);
 }
@@ -733,16 +783,18 @@ void config_save(void) {
     fprintf(f, "CycleMultiplier %03x\n", cycle_multiplier);
 #endif
 #ifdef GPU_UNAI
-    fprintf(f, "lighting %d\nfast_lighting %d\nblending %d\ndithering %d\nclip_368 %d\n",
+    fprintf(f, "lighting %d\nfast_lighting %d\nblending %d\ndithering %d\nclip_368 %d\n"
+               "pixel_skip %d\nilace_force %d\n",
             gpu_unai_config_ext.lighting, gpu_unai_config_ext.fast_lighting,
             gpu_unai_config_ext.blending, gpu_unai_config_ext.dithering,
-            gpu_unai_config_ext.clip_368);
+            gpu_unai_config_ext.clip_368,
+            gpu_unai_config_ext.pixel_skip, gpu_unai_config_ext.ilace_force);
 #endif
 #ifdef SPU_PCSXREARMED
     fprintf(f, "SpuUseInterpolation %d\nSpuUseReverb %d\nSpuVolume %d\n",
             spu_config.iUseInterpolation, spu_config.iUseReverb, spu_config.iVolume);
 #endif
-    fprintf(f, "ScaleMode %d\nScaleFilter %d\n", scale_mode, scale_filter);
+    fprintf(f, "ScaleMode %d\nScaleFilter %d\nGamma %d\n", scale_mode, scale_filter, gamma_percent);
     if (Config.LastDir[0]) fprintf(f, "LastDir %s\n", Config.LastDir);
     if (Config.BiosDir[0]) fprintf(f, "BiosDir %s\n", Config.BiosDir);
     if (Config.Bios[0])    fprintf(f, "Bios %s\n",    Config.Bios);
@@ -783,6 +835,11 @@ int main(int argc, char *argv[]) {
     Config.SpuUpdateFreq = 4; Config.ForcedXAUpdates = 1;
     Config.ShowFps = 0; Config.FrameLimit = 1; Config.FrameSkip = -1;
 #ifdef PSXREC
+    /* Stock 0x200 (2.0).  LOWERING it makes each instruction cost fewer cycles,
+     * so more instructions are emulated per frame = MORE host work = slower.
+     * RAISING it (e.g. 0x240/0x280) is the speed-hack (fewer emulated
+     * instructions) but starves the game's CPU → in-game slowdown/glitches.
+     * Keep accurate default; tune per-game via pcsx4all.cfg CycleMultiplier. */
     cycle_multiplier = 0x200;
 #endif
     strncpy(Config.BiosDir, homedir, sizeof(Config.BiosDir)-1);
@@ -794,6 +851,12 @@ int main(int argc, char *argv[]) {
     gpu_unai_config_ext.blending     = 0;
     gpu_unai_config_ext.dithering    = 0;
     gpu_unai_config_ext.clip_368     = 0;
+    /* SF3000: keep GPU output full-quality by default — NO line skipping
+     * (ilace_force=0) and NO pixel skipping (pixel_skip=0; risky with the HW
+     * downscaler anyway).  Speed comes from the lossless levers (cycle_multiplier
+     * + CPU governor).  Both remain per-game opt-in via pcsx4all.cfg. */
+    gpu_unai_config_ext.pixel_skip   = 0;
+    gpu_unai_config_ext.ilace_force  = 0;
 #endif
 
     config_load();
