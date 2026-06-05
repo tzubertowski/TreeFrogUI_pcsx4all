@@ -27,6 +27,7 @@
 #include "port.h"
 #include "r3000a.h"
 #include "plugins.h"
+#include "sio.h"
 #include "plugin_lib.h"
 #include "perfmon.h"
 #include "cdrom_hacks.h"
@@ -860,6 +861,30 @@ int main(int argc, char *argv[]) {
 #endif
 
     config_load();
+
+    /* Memory cards: the sf3000 port never set these, so Config.Mcd1/2 were
+     * empty → BIOS reported "no card" → games couldn't save. Point them at
+     * persistent files under homedir/memcards (LoadMcd auto-creates the .mcr
+     * if the parent dir exists). */
+    {
+        static char mcddir[PATH_MAX];
+        snprintf(mcddir, sizeof(mcddir), "%s/memcards", homedir);
+        mkdir(mcddir, 0755);
+        snprintf(Config.Mcd1, sizeof(Config.Mcd1), "%s/mcd001.mcr", mcddir);
+        snprintf(Config.Mcd2, sizeof(Config.Mcd2), "%s/mcd002.mcr", mcddir);
+    }
+
+    /* Prefer a real BIOS when present — it handles memory cards natively, which
+     * is far more compatible than the HLE BIOS. Force BiosDir back to homedir
+     * (a stale cfg may point it elsewhere) and look for the BIOS there; drop
+     * scph1001.bin in /mnt/sdcard/cubegm/cores/.pcsx4all/. psxMemInit() matches
+     * the filename case-insensitively and auto-reverts to HLE if it's missing. */
+    strncpy(Config.BiosDir, homedir, sizeof(Config.BiosDir)-1);
+    Config.BiosDir[sizeof(Config.BiosDir)-1] = '\0';
+    strncpy(Config.Bios, "scph1001.bin", sizeof(Config.Bios)-1);
+    Config.Bios[sizeof(Config.Bios)-1] = '\0';
+    Config.HLE = 0;
+
     /* ROM from command line arg 1 */
     if (argc >= 2) {
         SetIsoFile(argv[1]);
@@ -890,6 +915,12 @@ int main(int argc, char *argv[]) {
     spu_config.iUseFixedUpdates   = 0;
     spu_config.iDisabled          = 0;
 #endif
+    /* This port hand-rolls plugin init and never calls LoadPlugins(), so do the
+     * memcard load here (creates the .mcr files if absent). Without this the
+     * cards are never inserted → games can't save. */
+    LoadMcd(MCD1, Config.Mcd1);
+    LoadMcd(MCD2, Config.Mcd2);
+
     if (CDR_init() < 0) { plog("CDR_init FAILED"); return 1; }
     if (GPU_init() < 0) { plog("GPU_init FAILED"); return 1; }
     if (SPU_init() < 0) { plog("SPU_init FAILED"); return 1; }
