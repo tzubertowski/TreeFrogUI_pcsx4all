@@ -420,6 +420,8 @@ static void shutdown_display(void) {
 #define CV_Y     15   /* Triangle */
 #define CV_L     10
 #define CV_R     11
+#define CV_L2     8
+#define CV_R2     9
 #define CV_SEL    0
 #define CV_START  3
 
@@ -630,6 +632,8 @@ void pad_update(void) {
     if (btn(k, CV_Y))     p &= ~PSX_TRIANGLE;
     if (btn(k, CV_L))     p &= ~PSX_L1;
     if (btn(k, CV_R))     p &= ~PSX_R1;
+    if (btn(k, CV_L2))    p &= ~PSX_L2;
+    if (btn(k, CV_R2))    p &= ~PSX_R2;
     if (btn(k, CV_SEL))   p &= ~PSX_SELECT;
     if (btn(k, CV_START)) p &= ~PSX_START;
     pad1 = p;
@@ -832,7 +836,7 @@ int main(int argc, char *argv[]) {
     plog(argv[1]);
     /* Defaults */
     Config.Xa = 0; Config.Mdec = 0; Config.PsxAuto = 1;
-    Config.Cdda = 0; Config.HLE = 1;
+    Config.Cdda = 0; Config.HLE = 0;  /* 0=BIOS (preferred); psxMemInit falls back to HLE if missing */
     Config.SpuUpdateFreq = 4; Config.ForcedXAUpdates = 1;
     Config.ShowFps = 0; Config.FrameLimit = 1; Config.FrameSkip = -1;
 #ifdef PSXREC
@@ -859,6 +863,16 @@ int main(int argc, char *argv[]) {
     gpu_unai_config_ext.pixel_skip   = 0;
     gpu_unai_config_ext.ilace_force  = 0;
 #endif
+#ifdef SPU_PCSXREARMED
+    spu_config.iHaveConfiguration = 1;
+    spu_config.iUseReverb         = 0;
+    spu_config.iUseInterpolation  = 0;
+    spu_config.iXAPitch           = 0;
+    spu_config.iVolume            = 1024;
+    spu_config.iUseThread         = 0;
+    spu_config.iUseFixedUpdates   = 0;
+    spu_config.iDisabled          = 0;
+#endif
 
     config_load();
 
@@ -874,16 +888,11 @@ int main(int argc, char *argv[]) {
         snprintf(Config.Mcd2, sizeof(Config.Mcd2), "%s/mcd002.mcr", mcddir);
     }
 
-    /* Prefer a real BIOS when present — it handles memory cards natively, which
-     * is far more compatible than the HLE BIOS. Force BiosDir back to homedir
-     * (a stale cfg may point it elsewhere) and look for the BIOS there; drop
-     * scph1001.bin in /mnt/sdcard/cubegm/cores/.pcsx4all/. psxMemInit() matches
-     * the filename case-insensitively and auto-reverts to HLE if it's missing. */
-    strncpy(Config.BiosDir, homedir, sizeof(Config.BiosDir)-1);
-    Config.BiosDir[sizeof(Config.BiosDir)-1] = '\0';
-    strncpy(Config.Bios, "scph1001.bin", sizeof(Config.Bios)-1);
-    Config.Bios[sizeof(Config.Bios)-1] = '\0';
-    Config.HLE = 0;
+    /* BIOS setup: defaults above set Config.HLE=0, Config.BiosDir=homedir,
+     * Config.Bios="scph1001.bin".  config_load() overwrites these with saved
+     * values from pcsx4all.cfg if it exists.  psxMemInit() auto-reverts to HLE
+     * if the BIOS file is missing.  No post-load override needed — user's
+     * saved settings are respected across sessions. */
 
     /* ROM from command line arg 1 */
     if (argc >= 2) {
@@ -905,16 +914,7 @@ int main(int argc, char *argv[]) {
         extern R3000Acpu psxRec;
         plog(psxCpu == &psxRec ? "dynarec ACTIVE" : "INTERPRETER (slow!)");
     }
-#ifdef SPU_PCSXREARMED
-    spu_config.iHaveConfiguration = 1;
-    spu_config.iUseReverb         = 0;
-    spu_config.iUseInterpolation  = 0;
-    spu_config.iXAPitch           = 0;
-    spu_config.iVolume            = 1024;
-    spu_config.iUseThread         = 0;
-    spu_config.iUseFixedUpdates   = 0;
-    spu_config.iDisabled          = 0;
-#endif
+
     /* This port hand-rolls plugin init and never calls LoadPlugins(), so do the
      * memcard load here (creates the .mcr files if absent). Without this the
      * cards are never inserted → games can't save. */
