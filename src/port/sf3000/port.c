@@ -474,12 +474,20 @@ static void sf3000_menu(void) {
             snprintf(gamma_label, sizeof(gamma_label), "Gamma:  %d.%02d",
                      gamma_percent / 100, gamma_percent % 100);
 
+        char pixskip_label[48], ilace_label[48];
+        snprintf(pixskip_label, sizeof(pixskip_label), "Pixel Skip (speed): %s",
+                 gpu_unai_config_ext.pixel_skip ? "On" : "Off");
+        snprintf(ilace_label, sizeof(ilace_label), "Interlace (speed):  %s",
+                 gpu_unai_config_ext.ilace_force ? "On" : "Off");
+
         const char *items[] = {
             "Resume",
             "Save State (slot 1)",
             "Load State (slot 1)",
             scale_label,
             gamma_label,
+            pixskip_label,
+            ilace_label,
             "PCSX Settings",
             "Exit to FrogUI",
             NULL
@@ -525,6 +533,10 @@ static void sf3000_menu(void) {
                 gamma_percent += rt ? 10 : -10;
                 if (gamma_percent < 100) gamma_percent = 100;
                 if (gamma_percent > 250) gamma_percent = 250;
+            } else if (sel == 5) {
+                gpu_unai_config_ext.pixel_skip = !gpu_unai_config_ext.pixel_skip;
+            } else if (sel == 6) {
+                gpu_unai_config_ext.ilace_force = !gpu_unai_config_ext.ilace_force;
             }
         }
         if (a) {
@@ -540,7 +552,13 @@ static void sf3000_menu(void) {
                 case 4: /* gamma: A toggles off/default */
                     gamma_percent = (gamma_percent > 100) ? 100 : 130;
                     break;
-                case 5: {
+                case 5: /* pixel skip: A toggles */
+                    gpu_unai_config_ext.pixel_skip = !gpu_unai_config_ext.pixel_skip;
+                    break;
+                case 6: /* interlace: A toggles */
+                    gpu_unai_config_ext.ilace_force = !gpu_unai_config_ext.ilace_force;
+                    break;
+                case 7: {
                     extern int GameMenu(void);
                     extern void sdl_poll_reset(void);
                     while (cv_keys && btn(*cv_keys, CV_A)) usleep(10000);
@@ -550,7 +568,7 @@ static void sf3000_menu(void) {
                     last_fb_y_off = -1; last_fb_y_len = -1;
                     break;
                 }
-                case 6: config_save(); exit(0);
+                case 8: config_save(); exit(0);
             }
         }
     }
