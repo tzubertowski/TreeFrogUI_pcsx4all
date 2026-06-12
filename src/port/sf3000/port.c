@@ -644,10 +644,12 @@ void pad_update(void) {
     if (btn(k, CV_DOWN))  p &= ~PSX_DOWN;
     if (btn(k, CV_LEFT))  p &= ~PSX_LEFT;
     if (btn(k, CV_RIGHT)) p &= ~PSX_RIGHT;
-    if (btn(k, CV_A))     p &= ~PSX_CROSS;
-    if (btn(k, CV_B))     p &= ~PSX_CIRCLE;
-    if (btn(k, CV_X))     p &= ~PSX_SQUARE;
-    if (btn(k, CV_Y))     p &= ~PSX_TRIANGLE;
+    /* Match the retropad layout used by every other TreeFrogUI core:
+     * B=Cross, A=Circle, Y=Square, X=Triangle. */
+    if (btn(k, CV_B))     p &= ~PSX_CROSS;
+    if (btn(k, CV_A))     p &= ~PSX_CIRCLE;
+    if (btn(k, CV_Y))     p &= ~PSX_SQUARE;
+    if (btn(k, CV_X))     p &= ~PSX_TRIANGLE;
     if (btn(k, CV_L))     p &= ~PSX_L1;
     if (btn(k, CV_R))     p &= ~PSX_R1;
     if (btn(k, CV_L2))    p &= ~PSX_L2;
