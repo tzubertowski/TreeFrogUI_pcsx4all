@@ -25,6 +25,7 @@
 
 #include "SDL.h"
 #include "port.h"
+#include "dspr2_prof.h"
 #include "r3000a.h"
 #include "plugins.h"
 #include "sio.h"
@@ -668,6 +669,7 @@ void video_flip(void) {
     if (Config.ShowFps) port_printf(2, 2, pl_data.stats_msg);
     gamma_apply(SCREEN, SCREEN_WIDTH * SCREEN_HEIGHT);
     display_blit(SCREEN, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH * 2);
+    PROF_FRAME_TICK();
 }
 
 void video_clear(void) {

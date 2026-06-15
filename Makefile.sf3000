@@ -41,6 +41,15 @@ ifdef RECOMPILER
 CFLAGS += -DPSXREC -D$(RECOMPILER)
 endif
 
+# Skip D-cache flush on dynarec code-cache flush (ICACHE-only, like the rs97/
+# amini/gcw0 MIPS ports). Big CPU win for code-flush-heavy games (e.g. THPS3).
+# Correctness risk: relies on HW making generated code visible to I-fetch
+# without explicit D-cache writeback. Verify stability before shipping.
+CFLAGS += -DDYNAREC_SKIP_DCACHE_FLUSH
+
+# Opt-in extra flags, e.g. make -f Makefile.sf3000 EXTRA_CFLAGS=-DDSPR2_PROFILE
+CFLAGS += $(EXTRA_CFLAGS)
+
 LDFLAGS = -mips32r2 -mhard-float -mfp32 -EL \
           --sysroot=$(SYSROOT) \
           -L$(SYSROOT)/usr/lib \
