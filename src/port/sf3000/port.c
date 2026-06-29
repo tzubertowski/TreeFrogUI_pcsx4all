@@ -445,6 +445,28 @@ static void shutdown_display(void) {
 static volatile uint32_t *cv_keys = NULL;
 static uint16_t pad1 = 0xFFFF; /* all released */
 
+/* ---- Remappable controls --------------------------------------------------
+ * Each PSX face/shoulder button is driven by a physical CV bit, reassignable in
+ * the in-game menu (Controls) and saved to pcsx4all.cfg. Dpad/Select/Start stay
+ * fixed (standard). Defaults match the old hardcoded layout. */
+enum { PB_CROSS, PB_CIRCLE, PB_SQUARE, PB_TRIANGLE, PB_L1, PB_R1, PB_L2, PB_R2, PB_COUNT };
+static const char *pb_name[PB_COUNT] =
+    { "Cross (X)", "Circle (O)", "Square", "Triangle", "L1", "R1", "L2", "R2" };
+static const uint16_t pb_mask[PB_COUNT] =
+    { PSX_CROSS, PSX_CIRCLE, PSX_SQUARE, PSX_TRIANGLE, PSX_L1, PSX_R1, PSX_L2, PSX_R2 };
+static int pb_bind[PB_COUNT] = { CV_B, CV_A, CV_Y, CV_X, CV_L, CV_R, CV_L2, CV_R2 };
+
+/* Physical buttons the user can bind to (label + CV bit). */
+static const struct { const char *name; int bit; } cv_btns[] = {
+    { "A",  CV_A }, { "B",  CV_B }, { "X",  CV_X }, { "Y",  CV_Y },
+    { "L1", CV_L }, { "R1", CV_R }, { "L2", CV_L2 }, { "R2", CV_R2 },
+};
+#define CV_BTNS_N ((int)(sizeof(cv_btns)/sizeof(cv_btns[0])))
+static const char *cv_bit_name(int bit) {
+    for (int i = 0; i < CV_BTNS_N; i++) if (cv_btns[i].bit == bit) return cv_btns[i].name;
+    return "?";
+}
+
 static void input_init(void) {
     key_t k = ftok("/tmp/joy_key", 'a');
     if (k == (key_t)-1) { fprintf(stderr, "SF3000: ftok failed\n"); return; }
@@ -458,6 +480,53 @@ static void input_init(void) {
 static inline int btn(uint32_t state, int bit) { return (state >> bit) & 1; }
 
 void config_save(void);
+
+/* Controls remap screen: pick a PSX button, press a physical button to bind it.
+ * Saved with the rest of the config on "Exit to FrogUI". */
+static void sf3000_controls_menu(void) {
+    int sel = 0;
+    uint32_t prev = cv_keys ? *cv_keys : 0;
+    while (1) {
+        video_clear();
+        port_printf(2, 0, "=== CONTROLS (remap) ===");
+        for (int i = 0; i < PB_COUNT; i++) {
+            char buf[64];
+            snprintf(buf, sizeof buf, "%s%-11s = %s button",
+                     (i == sel) ? "> " : "  ", pb_name[i], cv_bit_name(pb_bind[i]));
+            port_printf(2, (i + 2) * 10, buf);
+        }
+        port_printf(2, (PB_COUNT + 3) * 10, "A=rebind  B=back  (saved on Exit)");
+        video_flip();
+        usleep(16000);
+        if (!cv_keys) continue;
+        uint32_t k = *cv_keys;
+        int up = btn(k, CV_UP)   && !btn(prev, CV_UP);
+        int dn = btn(k, CV_DOWN) && !btn(prev, CV_DOWN);
+        int a  = btn(k, CV_A)    && !btn(prev, CV_A);
+        int b  = btn(k, CV_B)    && !btn(prev, CV_B);
+        prev = k;
+        if (up && sel > 0) sel--;
+        if (dn && sel < PB_COUNT - 1) sel++;
+        if (b) return;
+        if (a) {
+            video_clear();
+            port_printf(2, 0, "=== CONTROLS (remap) ===");
+            char msg[64]; snprintf(msg, sizeof msg, "Press a button for %s", pb_name[sel]);
+            port_printf(2, 30, msg);
+            video_flip();
+            while (cv_keys && *cv_keys) usleep(10000);      /* wait all released */
+            int done = 0;
+            while (!done && cv_keys) {
+                uint32_t kk = *cv_keys;
+                for (int j = 0; j < CV_BTNS_N; j++)
+                    if (btn(kk, cv_btns[j].bit)) { pb_bind[sel] = cv_btns[j].bit; done = 1; break; }
+                usleep(10000);
+            }
+            while (cv_keys && *cv_keys) usleep(10000);       /* wait release */
+            prev = cv_keys ? *cv_keys : 0;
+        }
+    }
+}
 
 static void sf3000_menu(void) {
     int sel = 0;
@@ -490,6 +559,7 @@ static void sf3000_menu(void) {
             pixskip_label,
             ilace_label,
             "PCSX Settings",
+            "Controls (remap)",
             "Exit to FrogUI",
             NULL
         };
@@ -569,7 +639,14 @@ static void sf3000_menu(void) {
                     last_fb_y_off = -1; last_fb_y_len = -1;
                     break;
                 }
-                case 8: config_save(); exit(0);
+                case 8: {  /* Controls (remap) */
+                    while (cv_keys && btn(*cv_keys, CV_A)) usleep(10000);
+                    sf3000_controls_menu();
+                    config_save();   /* persist immediately so a remap can't be lost */
+                    prev = cv_keys ? *cv_keys : 0;
+                    break;
+                }
+                case 9: config_save(); exit(0);
             }
         }
     }
@@ -645,16 +722,10 @@ void pad_update(void) {
     if (btn(k, CV_DOWN))  p &= ~PSX_DOWN;
     if (btn(k, CV_LEFT))  p &= ~PSX_LEFT;
     if (btn(k, CV_RIGHT)) p &= ~PSX_RIGHT;
-    /* Match the retropad layout used by every other TreeFrogUI core:
-     * B=Cross, A=Circle, Y=Square, X=Triangle. */
-    if (btn(k, CV_B))     p &= ~PSX_CROSS;
-    if (btn(k, CV_A))     p &= ~PSX_CIRCLE;
-    if (btn(k, CV_Y))     p &= ~PSX_SQUARE;
-    if (btn(k, CV_X))     p &= ~PSX_TRIANGLE;
-    if (btn(k, CV_L))     p &= ~PSX_L1;
-    if (btn(k, CV_R))     p &= ~PSX_R1;
-    if (btn(k, CV_L2))    p &= ~PSX_L2;
-    if (btn(k, CV_R2))    p &= ~PSX_R2;
+    /* Face + shoulder buttons via the remappable bind table (default layout:
+     * B=Cross, A=Circle, Y=Square, X=Triangle, L/R/L2/R2 1:1). */
+    for (int i = 0; i < PB_COUNT; i++)
+        if (btn(k, pb_bind[i])) p &= ~pb_mask[i];
     if (btn(k, CV_SEL))   p &= ~PSX_SELECT;
     if (btn(k, CV_START)) p &= ~PSX_START;
     pad1 = p;
@@ -745,6 +816,7 @@ void config_load(void) {
         int v; sscanf(arg, "%d", &v);
 
         if (!strcmp(line,"CONFIG_VERSION")) { if (v != 0) break; }
+        else if (!strncmp(line,"PsxBind",7)) { int idx = atoi(line+7); if (idx >= 0 && idx < PB_COUNT) pb_bind[idx] = v; }
         else if (!strcmp(line,"Xa"))              Config.Xa = v;
         else if (!strcmp(line,"Mdec"))            Config.Mdec = v;
         else if (!strcmp(line,"PsxAuto"))         Config.PsxAuto = v;
@@ -822,6 +894,7 @@ void config_save(void) {
             spu_config.iUseInterpolation, spu_config.iUseReverb, spu_config.iVolume);
 #endif
     fprintf(f, "ScaleMode %d\nScaleFilter %d\nGamma %d\n", scale_mode, scale_filter, gamma_percent);
+    for (int i = 0; i < PB_COUNT; i++) fprintf(f, "PsxBind%d %d\n", i, pb_bind[i]);
     if (Config.LastDir[0]) fprintf(f, "LastDir %s\n", Config.LastDir);
     if (Config.BiosDir[0]) fprintf(f, "BiosDir %s\n", Config.BiosDir);
     if (Config.Bios[0])    fprintf(f, "Bios %s\n",    Config.Bios);
@@ -851,6 +924,56 @@ int state_save(int slot) {
  * -------------------------------------------------------------------------- */
 void plog_pub(const char *msg) { (void)msg; }
 static void plog(const char *msg) { (void)msg; }
+
+/* FrogUI's recents switcher shows /mnt/sdcard/picoarch/<tag>/<base>.scr.bmp,
+ * written by picoarch cores on exit. Standalone pcsx4all isn't a picoarch core,
+ * so PS1 had no recents screenshot — dump the last frame here on exit. */
+static char g_rom_path[1024];
+
+static void write_recent_screenshot(void) {
+    if (!SCREEN || !g_rom_path[0]) return;
+    char dir[1024]; strncpy(dir, g_rom_path, sizeof dir - 1); dir[sizeof dir - 1] = 0;
+    char *sl = strrchr(dir, '/'); if (!sl) return;
+    char base[256]; strncpy(base, sl + 1, sizeof base - 1); base[sizeof base - 1] = 0;
+    *sl = 0;
+    char *tagsl = strrchr(dir, '/'); const char *tag = tagsl ? tagsl + 1 : dir;
+    char *dot = strrchr(base, '.'); if (dot) *dot = 0;
+
+    char d[1100]; snprintf(d, sizeof d, "/mnt/sdcard/picoarch/%s", tag);
+    mkdir("/mnt/sdcard/picoarch", 0777); mkdir(d, 0777);
+    char out[1200]; snprintf(out, sizeof out, "%s/%s.scr.bmp", d, base);
+    FILE *f = fopen(out, "wb"); if (!f) return;
+
+    int w = SCREEN_WIDTH, h = SCREEN_HEIGHT;
+    int row = (w * 3 + 3) & ~3;                  /* rows 4-byte aligned */
+    int imgsz = row * h, total = 54 + imgsz;
+    unsigned char hd[54] = {0};
+    hd[0]='B'; hd[1]='M';
+    hd[2]=total; hd[3]=total>>8; hd[4]=total>>16; hd[5]=total>>24;
+    hd[10]=54; hd[14]=40;
+    hd[18]=w; hd[19]=w>>8; hd[20]=w>>16; hd[21]=w>>24;
+    hd[22]=h; hd[23]=h>>8; hd[24]=h>>16; hd[25]=h>>24;
+    hd[26]=1; hd[28]=24;
+    hd[34]=imgsz; hd[35]=imgsz>>8; hd[36]=imgsz>>16; hd[37]=imgsz>>24;
+    fwrite(hd, 1, 54, f);
+
+    unsigned char *line = (unsigned char*)malloc(row);
+    if (!line) { fclose(f); return; }
+    for (int y = h - 1; y >= 0; y--) {           /* BMP is bottom-up */
+        const unsigned short *s = SCREEN + (size_t)y * w;
+        int o = 0;
+        for (int x = 0; x < w; x++) {
+            unsigned short px = s[x];
+            line[o++] = (px & 0x1F) << 3;            /* B */
+            line[o++] = ((px >> 5)  & 0x3F) << 2;    /* G */
+            line[o++] = ((px >> 11) & 0x1F) << 3;    /* R */
+        }
+        while (o < row) line[o++] = 0;
+        fwrite(line, 1, row, f);
+    }
+    free(line);
+    fclose(f);
+}
 
 int main(int argc, char *argv[]) {
     plog("main: start");
@@ -919,6 +1042,7 @@ int main(int argc, char *argv[]) {
     /* ROM from command line arg 1 */
     if (argc >= 2) {
         SetIsoFile(argv[1]);
+        strncpy(g_rom_path, argv[1], sizeof(g_rom_path)-1);
         strncpy(Config.LastDir, argv[1], sizeof(Config.LastDir)-1);
         char *sl = strrchr(Config.LastDir, '/');
         if (sl) *sl = '\0';
@@ -926,6 +1050,7 @@ int main(int argc, char *argv[]) {
 
     if (display_init() < 0) { plog("display_init FAILED"); return 1; }
     atexit(shutdown_display);
+    atexit(write_recent_screenshot);   /* runs before shutdown_display (LIFO) → SCREEN valid */
     input_init();
 
     mkdir(sstatesdir, 0755);
