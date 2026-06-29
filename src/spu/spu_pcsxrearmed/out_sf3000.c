@@ -8,8 +8,8 @@
 #include <string.h>
 #include <dlfcn.h>
 #include "out.h"
+#include "tf_driver.h"
 
-#define DRIVER_PATH "/mnt/sdcard/cubegm/driver.so"
 #define IN_RATE     44100
 #define OUT_RATE    48000
 
@@ -29,10 +29,26 @@ static int16_t  g_last_r = 0;
 #define OUT_BUF_FRAMES 4096
 static int16_t g_out_buf[OUT_BUF_FRAMES * 2];
 
+/* Global output gain (8.8 fixed, 256 = 1.0), shared with picoarch/FrogUI via
+ * cubegm/sndgain.txt — there's no system mixer on this hardware. */
+static int g_gain_q8 = 256;
+static void load_snd_gain(void) {
+    g_gain_q8 = 256;
+    FILE *f = fopen("/mnt/sdcard/cubegm/sndgain.txt", "r");
+    if (!f) return;
+    int pct = 100;
+    if (fscanf(f, "%d", &pct) == 1) {
+        if (pct < 0) pct = 0; if (pct > 100) pct = 100;
+        g_gain_q8 = pct * 256 / 100;
+    }
+    fclose(f);
+}
+
 static int sf3000_init(void) {
     if (g_active) return 0;
+    load_snd_gain();
     if (!g_handle) {
-        g_handle = dlopen(DRIVER_PATH, RTLD_LAZY);
+        g_handle = dlopen(tf_driver_path(), RTLD_LAZY);
         if (!g_handle) {
             fprintf(stderr, "out_sf3000: dlopen failed: %s\n", dlerror());
             return -1;
@@ -119,6 +135,10 @@ static void sf3000_feed(void *buf, int bytes) {
     g_last_l = last_l;
     g_last_r = last_r;
 
+    if (g_gain_q8 < 256) {
+        for (int i = 0; i < out_idx * 2; i++)
+            g_out_buf[i] = (int16_t)(((int)g_out_buf[i] * g_gain_q8) >> 8);
+    }
     if (out_idx > 0) p_playframe(g_out_buf, out_idx);
 }
 
