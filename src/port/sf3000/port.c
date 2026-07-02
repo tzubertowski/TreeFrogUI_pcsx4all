@@ -454,7 +454,7 @@ static const char *pb_name[PB_COUNT] =
     { "Cross (X)", "Circle (O)", "Square", "Triangle", "L1", "R1", "L2", "R2" };
 static const uint16_t pb_mask[PB_COUNT] =
     { PSX_CROSS, PSX_CIRCLE, PSX_SQUARE, PSX_TRIANGLE, PSX_L1, PSX_R1, PSX_L2, PSX_R2 };
-static int pb_bind[PB_COUNT] = { CV_B, CV_A, CV_Y, CV_X, CV_L, CV_R, CV_L2, CV_R2 };
+static int pb_bind[PB_COUNT] = { CV_A, CV_B, CV_X, CV_Y, CV_L, CV_R, CV_L2, CV_R2 };
 
 /* Physical buttons the user can bind to (label + CV bit). */
 static const struct { const char *name; int bit; } cv_btns[] = {
