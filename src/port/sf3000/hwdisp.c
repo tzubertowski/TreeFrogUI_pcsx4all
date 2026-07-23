@@ -10,6 +10,7 @@
  * black pillar-bars so driver's stretch becomes uniform. */
 
 #include "hwdisp.h"
+#include "tf_driver.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,7 +49,7 @@ static int g_filter_nearest = 0;
 int hwdisp_init(void) {
     if (g_active) return 0;
 
-    g_handle = dlopen("/mnt/sdcard/cubegm/driver.so", RTLD_NOW | RTLD_GLOBAL);
+    g_handle = dlopen(tf_driver_path(), RTLD_NOW | RTLD_GLOBAL);
     if (!g_handle) {
         fprintf(stderr, "hwdisp: dlopen failed: %s\n", dlerror());
         return -1;
@@ -283,6 +284,30 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
             return;
         }
         /* Fallthrough to HW path if alloc failed */
+    }
+
+    /* HW (bilinear) path. disp_frame's async HCGE thread DMA-reads the source
+     * buffer AFTER we return, while the emulator overwrites SCREEN for the next
+     * frame. Handing it the live buffer races that DMA (bus contention can hang
+     * the HCGE engine -> panel wedges permanently, e.g. Colin McRae). picoarch
+     * uses the same driver without wedging precisely because it stages into a
+     * ping-pong buffer first. Do the same: copy into a stable double-buffer so
+     * the engine always scans a frame the CPU is done writing. */
+    static uint16_t *fs[2]; static int fsi;
+    static int fs_cap;
+    int need = w * h;
+    if (need > fs_cap) {
+        free(fs[0]); free(fs[1]);
+        fs[0] = (uint16_t*)malloc(need * 2);
+        fs[1] = (uint16_t*)malloc(need * 2);
+        fs_cap = (fs[0] && fs[1]) ? need : 0;
+    }
+    if (fs[0] && fs[1]) {
+        uint16_t *dst = fs[fsi]; fsi ^= 1;
+        const int sp = pitch_bytes / 2;
+        for (int y = 0; y < h; y++)
+            memcpy(dst + (size_t)y * w, (const uint16_t *)src + (size_t)y * sp, (size_t)w * 2);
+        src = dst; pitch_bytes = w * 2;
     }
 
     /* HW (bilinear) path: pass through, optional aspect pad. */

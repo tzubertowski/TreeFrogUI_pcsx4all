@@ -257,6 +257,11 @@ static void compose_aspect_4to3(const void *src, int w, int h, int pitch) {
 }
 
 static void display_blit(const void *src, int w, int h, int pitch) {
+    /* Log resolution changes (gated on pcsx_log.txt) for diagnostics. */
+    { static int lw = -1, lh = -1;
+      if (w != lw || h != lh) {
+          char b[80]; snprintf(b, sizeof b, "blit res %dx%d scale=%d", w, h, scale_mode);
+          plog(b); lw = w; lh = h; } }
     /* Always use HW path: SW fb0 writes are invisible once hwdisp_init has
      * activated HCGE in this process, because per-frame dis_assert() can't
      * override HCGE display routing on this hardware. */
@@ -923,7 +928,16 @@ int state_save(int slot) {
  * main()
  * -------------------------------------------------------------------------- */
 void plog_pub(const char *msg) { (void)msg; }
-static void plog(const char *msg) { (void)msg; }
+static void plog(const char *msg) {
+    /* Gated diagnostic: writes only if /mnt/sdcard/pcsx_log.txt exists. Zero
+     * cost on a shipping card (no file). Used to capture the PSX resolution
+     * transitions before a driver freeze. */
+    static int en = -1;
+    if (en < 0) { FILE *t = fopen("/mnt/sdcard/pcsx_log.txt", "r"); en = t ? 1 : 0; if (t) fclose(t); }
+    if (!en) return;
+    FILE *f = fopen("/mnt/sdcard/pcsx_log.txt", "a");
+    if (f) { fprintf(f, "%s\n", msg); fflush(f); fsync(fileno(f)); fclose(f); }
+}
 
 /* FrogUI's recents switcher shows /mnt/sdcard/picoarch/<tag>/<base>.scr.bmp,
  * written by picoarch cores on exit. Standalone pcsx4all isn't a picoarch core,
