@@ -25,6 +25,7 @@
 
 #include "SDL.h"
 #include "port.h"
+#include "tf_driver.h"
 #include "dspr2_prof.h"
 #include "r3000a.h"
 #include "plugins.h"
@@ -256,12 +257,37 @@ static void compose_aspect_4to3(const void *src, int w, int h, int pitch) {
     hwdisp_present(buf, target_w, h, target_w * 2);
 }
 
+static int tf_is_r36sx(void) {
+    static int v = -1;
+    if (v < 0) { const char *d = tf_driver_path(); v = strstr(d, "r36sx") ? 1 : 0; }
+    return v;
+}
+
 static void display_blit(const void *src, int w, int h, int pitch) {
     /* Log resolution changes (gated on pcsx_log.txt) for diagnostics. */
     { static int lw = -1, lh = -1;
       if (w != lw || h != lh) {
           char b[80]; snprintf(b, sizeof b, "blit res %dx%d scale=%d", w, h, scale_mode);
           plog(b); lw = w; lh = h; } }
+
+    /* R36SX's disp_frame blacks out on large (panel-height) frames: it presents
+     * 320x240 fine but a 640x480 hi-res frame (Worms Armageddon) goes black. PSX
+     * hi-res is the interlaced 2x of the base mode, so decimate it 2x back into a
+     * size the driver actually presents. R36SX only — SF-class handles big frames
+     * natively (its decrypted driver renders panel-size fine). */
+    static uint16_t hbuf[320 * 256];
+    if (tf_is_r36sx() && h > 256) {
+        int dw = w / 2, dh = h / 2;
+        if (dw > 320) dw = 320;
+        if (dh > 256) dh = 256;
+        const uint16_t *s = (const uint16_t *)src; int sp = pitch / 2;
+        for (int y = 0; y < dh; y++) {
+            const uint16_t *sr = s + (size_t)(y * 2) * sp;
+            uint16_t *dr = hbuf + (size_t)y * dw;
+            for (int x = 0; x < dw; x++) dr[x] = sr[x * 2];
+        }
+        src = hbuf; w = dw; h = dh; pitch = dw * 2;
+    }
     /* Always use HW path: SW fb0 writes are invisible once hwdisp_init has
      * activated HCGE in this process, because per-frame dis_assert() can't
      * override HCGE display routing on this hardware. */

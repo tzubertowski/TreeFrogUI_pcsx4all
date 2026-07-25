@@ -321,6 +321,9 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
     }
 
     int pad_w = h * g_aspect_num / g_aspect_den;
+    pad_w &= ~1;   /* disp_frame/HCGE wedges to a black panel on an ODD width
+                    * (e.g. 853 for a 480-tall hi-res frame -> Worms Armageddon).
+                    * Round down to even; the 1px aspect loss is invisible. */
     if (pad_w <= w) {
         p_disp((void *)src, w, h, pitch_bytes);
         return;
