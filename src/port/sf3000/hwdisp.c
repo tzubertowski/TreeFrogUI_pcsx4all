@@ -286,33 +286,9 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
         /* Fallthrough to HW path if alloc failed */
     }
 
-    /* HW (bilinear) path. disp_frame's async HCGE thread DMA-reads the source
-     * buffer AFTER we return, while the emulator overwrites SCREEN for the next
-     * frame. Handing it the live buffer races that DMA (bus contention can hang
-     * the HCGE engine -> panel wedges permanently, e.g. Colin McRae). picoarch
-     * uses the same driver without wedging precisely because it stages into a
-     * ping-pong buffer first. Do the same: copy into a stable buffer so the
-     * engine always scans a frame the CPU is done writing. Triple-buffered (not
-     * just ping-pong): the driver's async DMA can lag more than one frame behind
-     * on a resolution switch (buffer realloc + timing spike), so two buffers can
-     * still get overwritten under it -> wedge on slower units. Three guarantees
-     * an untouched frame even when the engine is two frames behind. */
-    enum { FS_N = 3 };
-    static uint16_t *fs[FS_N]; static int fsi;
-    static int fs_cap;
-    int need = w * h;
-    if (need > fs_cap) {
-        int ok = 1;
-        for (int i = 0; i < FS_N; i++) { free(fs[i]); fs[i] = (uint16_t*)malloc(need * 2); if (!fs[i]) ok = 0; }
-        fs_cap = ok ? need : 0;
-    }
-    if (fs_cap) {
-        uint16_t *dst = fs[fsi]; fsi = (fsi + 1) % FS_N;
-        const int sp = pitch_bytes / 2;
-        for (int y = 0; y < h; y++)
-            memcpy(dst + (size_t)y * w, (const uint16_t *)src + (size_t)y * sp, (size_t)w * 2);
-        src = dst; pitch_bytes = w * 2;
-    }
+    /* No per-frame staging: the real wedge cause was disp_frame GEOMETRY thrash on
+     * rapid resolution changes, handled upstream by debouncing geometry (see
+     * display_blit). The live buffer goes straight to the driver here. */
 
     /* HW (bilinear) path: pass through, optional aspect pad. */
     if (g_aspect_num <= 0 || g_aspect_den <= 0) {

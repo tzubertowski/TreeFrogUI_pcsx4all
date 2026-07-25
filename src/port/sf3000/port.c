@@ -263,20 +263,29 @@ static int tf_is_r36sx(void) {
     return v;
 }
 
+/* Tallest game frame disp_frame presents without wedging/blacking. All these
+ * drivers choke on panel-height (480-tall) game frames: R36SX blanks, SF-class
+ * wedges the display pipeline after the hi-res storm (Colin McRae 640x480). PSX
+ * hi-res is the interlaced 2x of a <=256 base mode, so cap at 256 and decimate
+ * the tall modes back under it. (The FrogUI menu uses a different present path,
+ * so this doesn't affect it.) */
+static int tf_max_present_h(void) {
+    return 256;
+}
+
 static void display_blit(const void *src, int w, int h, int pitch) {
     /* Log resolution changes (gated on pcsx_log.txt) for diagnostics. */
     { static int lw = -1, lh = -1;
       if (w != lw || h != lh) {
           char b[80]; snprintf(b, sizeof b, "blit res %dx%d scale=%d", w, h, scale_mode);
           plog(b); lw = w; lh = h; } }
-
-    /* R36SX's disp_frame blacks out on large (panel-height) frames: it presents
-     * 320x240 fine but a 640x480 hi-res frame (Worms Armageddon) goes black. PSX
-     * hi-res is the interlaced 2x of the base mode, so decimate it 2x back into a
-     * size the driver actually presents. R36SX only — SF-class handles big frames
-     * natively (its decrypted driver renders panel-size fine). */
+    /* Some devices' disp_frame blacks out on frames taller than a per-device
+     * boundary (R36SX: fine at 320x240, black at 640x480 hi-res -> Worms). PSX
+     * hi-res is the interlaced 2x of the base mode, so decimate 2x back under the
+     * boundary. Boundary-driven, not device-hardcoded: SF-class has no effective
+     * cap, so it keeps full-res; any device that can't present tall frames does. */
     static uint16_t hbuf[320 * 256];
-    if (tf_is_r36sx() && h > 256) {
+    if (h > tf_max_present_h()) {
         int dw = w / 2, dh = h / 2;
         if (dw > 320) dw = 320;
         if (dh > 256) dh = 256;
@@ -446,8 +455,8 @@ static void shutdown_display(void) {
 #define CV_DOWN   6
 #define CV_LEFT   7
 #define CV_RIGHT  5
-#define CV_A     13   /* physical A - east  */
-#define CV_B     14   /* physical B - south */
+#define CV_A     13   /* physical A - south */
+#define CV_B     14   /* physical B - east  */
 #define CV_X     12   /* physical X - north */
 #define CV_Y     15   /* physical Y - west  */
 #define CV_L     10
@@ -485,10 +494,10 @@ static const char *pb_name[PB_COUNT] =
     { "Cross (X)", "Circle (O)", "Square", "Triangle", "L1", "R1", "L2", "R2" };
 static const uint16_t pb_mask[PB_COUNT] =
     { PSX_CROSS, PSX_CIRCLE, PSX_SQUARE, PSX_TRIANGLE, PSX_L1, PSX_R1, PSX_L2, PSX_R2 };
-/* Positional: PSX face button -> physical button in the same position.
- * Cross(S)->B, Circle(E)->A, Square(W)->Y, Triangle(N)->X. So the on-screen
- * "press Cross" = the south button (B), matching the PSX pad layout. */
-static int pb_bind[PB_COUNT] = { CV_B, CV_A, CV_Y, CV_X, CV_L, CV_R, CV_L2, CV_R2 };
+/* Positional: PSX face button -> physical button in the same position. On these
+ * pads A=south, B=east, X=north, Y=west, so: Cross(S)->A, Circle(E)->B,
+ * Square(W)->Y, Triangle(N)->X. The on-screen "press Cross" = the south button. */
+static int pb_bind[PB_COUNT] = { CV_A, CV_B, CV_Y, CV_X, CV_L, CV_R, CV_L2, CV_R2 };
 
 /* Physical buttons the user can bind to (label + CV bit). */
 static const struct { const char *name; int bit; } cv_btns[] = {
