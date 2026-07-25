@@ -446,10 +446,10 @@ static void shutdown_display(void) {
 #define CV_DOWN   6
 #define CV_LEFT   7
 #define CV_RIGHT  5
-#define CV_A     13   /* Cross    */
-#define CV_B     14   /* Circle   */
-#define CV_X     12   /* Square   */
-#define CV_Y     15   /* Triangle */
+#define CV_A     13   /* physical A - east  */
+#define CV_B     14   /* physical B - south */
+#define CV_X     12   /* physical X - north */
+#define CV_Y     15   /* physical Y - west  */
 #define CV_L     10
 #define CV_R     11
 #define CV_L2     8
@@ -485,7 +485,10 @@ static const char *pb_name[PB_COUNT] =
     { "Cross (X)", "Circle (O)", "Square", "Triangle", "L1", "R1", "L2", "R2" };
 static const uint16_t pb_mask[PB_COUNT] =
     { PSX_CROSS, PSX_CIRCLE, PSX_SQUARE, PSX_TRIANGLE, PSX_L1, PSX_R1, PSX_L2, PSX_R2 };
-static int pb_bind[PB_COUNT] = { CV_A, CV_B, CV_X, CV_Y, CV_L, CV_R, CV_L2, CV_R2 };
+/* Positional: PSX face button -> physical button in the same position.
+ * Cross(S)->B, Circle(E)->A, Square(W)->Y, Triangle(N)->X. So the on-screen
+ * "press Cross" = the south button (B), matching the PSX pad layout. */
+static int pb_bind[PB_COUNT] = { CV_B, CV_A, CV_Y, CV_X, CV_L, CV_R, CV_L2, CV_R2 };
 
 /* Physical buttons the user can bind to (label + CV bit). */
 static const struct { const char *name; int bit; } cv_btns[] = {
