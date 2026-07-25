@@ -291,19 +291,23 @@ void hwdisp_present(const void *src, int w, int h, int pitch_bytes) {
      * frame. Handing it the live buffer races that DMA (bus contention can hang
      * the HCGE engine -> panel wedges permanently, e.g. Colin McRae). picoarch
      * uses the same driver without wedging precisely because it stages into a
-     * ping-pong buffer first. Do the same: copy into a stable double-buffer so
-     * the engine always scans a frame the CPU is done writing. */
-    static uint16_t *fs[2]; static int fsi;
+     * ping-pong buffer first. Do the same: copy into a stable buffer so the
+     * engine always scans a frame the CPU is done writing. Triple-buffered (not
+     * just ping-pong): the driver's async DMA can lag more than one frame behind
+     * on a resolution switch (buffer realloc + timing spike), so two buffers can
+     * still get overwritten under it -> wedge on slower units. Three guarantees
+     * an untouched frame even when the engine is two frames behind. */
+    enum { FS_N = 3 };
+    static uint16_t *fs[FS_N]; static int fsi;
     static int fs_cap;
     int need = w * h;
     if (need > fs_cap) {
-        free(fs[0]); free(fs[1]);
-        fs[0] = (uint16_t*)malloc(need * 2);
-        fs[1] = (uint16_t*)malloc(need * 2);
-        fs_cap = (fs[0] && fs[1]) ? need : 0;
+        int ok = 1;
+        for (int i = 0; i < FS_N; i++) { free(fs[i]); fs[i] = (uint16_t*)malloc(need * 2); if (!fs[i]) ok = 0; }
+        fs_cap = ok ? need : 0;
     }
-    if (fs[0] && fs[1]) {
-        uint16_t *dst = fs[fsi]; fsi ^= 1;
+    if (fs_cap) {
+        uint16_t *dst = fs[fsi]; fsi = (fsi + 1) % FS_N;
         const int sp = pitch_bytes / 2;
         for (int y = 0; y < h; y++)
             memcpy(dst + (size_t)y * w, (const uint16_t *)src + (size_t)y * sp, (size_t)w * 2);

@@ -989,6 +989,57 @@ static void write_recent_screenshot(void) {
     fclose(f);
 }
 
+/* Auto-detect a PS1 BIOS so users don't have to name it exactly scph1001.bin.
+ * Probe the shared cubegm/bios dir first (what the docs recommend), then the
+ * legacy .pcsx4all dir. Accept any 512 KB (0x80000) file, preferring an scph*
+ * name; point Config at the first match. psxMemInit then loads it (HLE only if
+ * nothing valid is found). */
+static int probe_bios_dir(const char *dir) {
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    char found[256] = ""; int found_scph = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char p[PATH_MAX]; struct stat st;
+        if (snprintf(p, sizeof p, "%s/%s", dir, e->d_name) >= (int)sizeof p) continue;
+        if (stat(p, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size != 0x80000) continue;
+        if (strncasecmp(e->d_name, "scph", 4) == 0) {      /* real PS1 bios name */
+            strncpy(found, e->d_name, sizeof found - 1); found[sizeof found - 1] = 0;
+            found_scph = 1; break;
+        }
+        if (!found[0]) { strncpy(found, e->d_name, sizeof found - 1); found[sizeof found - 1] = 0; }
+    }
+    closedir(d);
+    if (!found[0]) return 0;
+    strncpy(Config.BiosDir, dir,   sizeof(Config.BiosDir) - 1);
+    strncpy(Config.Bios,    found, sizeof(Config.Bios) - 1);
+    Config.HLE = 0;   /* real BIOS present -> use it, override any stale cfg */
+    plog(found_scph ? "bios: auto-detected scph*" : "bios: auto-detected 512KB file");
+    plog(Config.BiosDir); plog(Config.Bios);
+    return 1;
+}
+/* Does `dir` contain a file named `name` (case-insensitive, like psxMemInit)? */
+static int bios_present(const char *dir, const char *name) {
+    if (!dir[0] || !name[0]) return 0;
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    struct dirent *e; int hit = 0;
+    while ((e = readdir(d))) if (!strcasecmp(e->d_name, name)) { hit = 1; break; }
+    closedir(d);
+    return hit;
+}
+static void probe_bios(void) {
+    /* Respect a manual/existing selection: if the configured BIOS actually
+     * resolves, leave BiosDir/Bios/HLE exactly as the user set them - no guess,
+     * no HLE override. Only auto-detect when it's unset or the file is missing;
+     * on a guess we switch HLE off so the found BIOS is actually used. */
+    if (bios_present(Config.BiosDir, Config.Bios)) return;
+    if (probe_bios_dir("/mnt/sdcard/cubegm/bios")) return;
+    if (probe_bios_dir(homedir)) return;
+    /* nothing found anywhere: leave config_load()'s values; psxMemInit HLEs. */
+}
+
 int main(int argc, char *argv[]) {
     plog("main: start");
     if (argc < 2) { plog("main: no ROM arg, exit"); return 1; }
@@ -1006,8 +1057,10 @@ int main(int argc, char *argv[]) {
      * Keep accurate default; tune per-game via pcsx4all.cfg CycleMultiplier. */
     cycle_multiplier = 0x200;
 #endif
-    strncpy(Config.BiosDir, homedir, sizeof(Config.BiosDir)-1);
-    strncpy(Config.Bios, "scph1001.bin", sizeof(Config.Bios)-1);
+    strncpy(Config.BiosDir, homedir, sizeof(Config.BiosDir) - 1);
+    strncpy(Config.Bios, "scph1001.bin", sizeof(Config.Bios) - 1);
+    /* BIOS auto-detect runs AFTER config_load() below, so it overrides a stale
+     * cfg pointing at an empty path. */
 
 #ifdef GPU_UNAI
     gpu_unai_config_ext.lighting     = 0;
@@ -1047,11 +1100,12 @@ int main(int argc, char *argv[]) {
         snprintf(Config.Mcd2, sizeof(Config.Mcd2), "%s/mcd002.mcr", mcddir);
     }
 
-    /* BIOS setup: defaults above set Config.HLE=0, Config.BiosDir=homedir,
-     * Config.Bios="scph1001.bin".  config_load() overwrites these with saved
-     * values from pcsx4all.cfg if it exists.  psxMemInit() auto-reverts to HLE
-     * if the BIOS file is missing.  No post-load override needed — user's
-     * saved settings are respected across sessions. */
+    /* BIOS auto-detect: if a real BIOS is present in cubegm/bios (or the legacy
+     * .pcsx4all dir), point Config at it and force HLE off — so just dropping the
+     * file in place "just works", no menu dance, even if a stale pcsx4all.cfg
+     * (loaded above) still points HLE on or at an empty path. If none is found we
+     * leave config_load()'s values and psxMemInit() HLE-falls-back. */
+    probe_bios();
 
     /* ROM from command line arg 1 */
     if (argc >= 2) {

@@ -1393,6 +1393,13 @@ static int bios_set()
   return 0;
 }
 
+static char *bios_file_show()
+{
+  static char buf[24];
+  snprintf(buf, sizeof buf, "%s", Config.Bios[0] ? Config.Bios : "(none)");
+  return buf;
+}
+
 static char *SlowBoot_show()
 {
 	static char buf[16] = "\0";
@@ -1570,7 +1577,7 @@ static MENUITEM gui_SettingsItems[] =
   {(char *)"Cycle multiplier     ", NULL, &cycle_alter, &cycle_show, NULL},
 #endif
   {(char *)"HLE emulated BIOS    ", NULL, &bios_alter, &bios_show, NULL},
-  {(char *)"Set BIOS file        ", &bios_set, NULL, NULL, NULL},
+  {(char *)"Set BIOS file        ", &bios_set, NULL, &bios_file_show, NULL},
   {(char *)"Skip BIOS logos      ", NULL, &SlowBoot_alter, &SlowBoot_show, &SlowBoot_hint},
   {(char *)"RCntFix              ", NULL, &RCntFix_alter, &RCntFix_show, &RCntFix_hint},
   {(char *)"VSyncWA              ", NULL, &VSyncWA_alter, &VSyncWA_show, &VSyncWA_hint},
