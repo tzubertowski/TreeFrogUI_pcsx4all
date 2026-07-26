@@ -224,13 +224,25 @@ static int display_init(void) {
  *
  * Cost: one horizontal resample (~76-150KB/frame); mirrors how the libretro
  * cores normalize their output. */
+static int tf_is_r36sx(void);   /* fwd: panel aspect differs by device */
+
+/* Present-time panel aspect. The frame is already normalized to 4:3 content, so:
+ *   SF-class (16:9 panel) -> pad it to 16:9 (pillarbox), driver fills the panel.
+ *   R36SX   (4:3 panel)   -> no pad; the 4:3 content full-stretches to the 4:3
+ *                            panel and fills it. Padding to 16:9 here was what
+ *                            double-letterboxed R36SX into huge black bars. */
+static void set_panel_aspect(void) {
+    if (tf_is_r36sx()) hwdisp_set_target_aspect(0, 0);
+    else               hwdisp_set_target_aspect(16, 9);
+}
+
 static void compose_aspect_4to3(const void *src, int w, int h, int pitch) {
     int target_w = h * 4 / 3;
     if (target_w > 640) target_w = 640;        /* buf cap */
 
     if (target_w == w) {
         /* Exactly 4:3 already (320×240): pass straight through. */
-        hwdisp_set_target_aspect(16, 9);
+        set_panel_aspect();
         hwdisp_set_filter(0);
         hwdisp_present(src, w, h, pitch);
         return;
@@ -253,7 +265,7 @@ static void compose_aspect_4to3(const void *src, int w, int h, int pitch) {
         for (int dx = 0; dx < target_w; dx++) drow[dx] = srow[x_map[dx]];
     }
 
-    hwdisp_set_target_aspect(16, 9);
+    set_panel_aspect();
     hwdisp_set_filter(0);
     hwdisp_present(buf, target_w, h, target_w * 2);
 }
