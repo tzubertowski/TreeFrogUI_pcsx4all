@@ -214,31 +214,32 @@ static int display_init(void) {
     return 0;
 }
 
-/* PSX wide-mode aspect normalize: when src width exceeds 4:3-of-height (i.e.
- * non-square PSX pixels, e.g. 512×240 / 640×240 / 384×240), downsample src
- * horizontally to 4:3 ratio (320×240 for 640×240). Pass result to driver via
- * the standard 16:9 pad. Driver then scales 4:3-padded buf uniformly to panel
- * → correct 4:3 image with pillarbox.
+/* PSX aspect normalize to 4:3. PSX pixels are non-square and every mode is meant
+ * to display at 4:3: WIDE modes (512×240 / 640×240 / 384×240, w > 4/3·h) must be
+ * squeezed horizontally, NARROW modes (256×240, w < 4/3·h) must be stretched
+ * horizontally. Doing only the wide case left narrow modes squished in width
+ * (res-dependent). We resample the width to 4/3·h either way, so the presented
+ * buffer is true 4:3; the driver then scales it uniformly to the panel with the
+ * correct pillarbox. Only an exact-4:3 source (320×240) skips the pass.
  *
- * Cost: one horizontal downsample pass (~150KB/frame for typical src). Much
- * cheaper than full panel compose; mirrors how libretro cores (pcsx_rearmed)
- * normalize their output. */
+ * Cost: one horizontal resample (~76-150KB/frame); mirrors how the libretro
+ * cores normalize their output. */
 static void compose_aspect_4to3(const void *src, int w, int h, int pitch) {
     int target_w = h * 4 / 3;
-    if (target_w >= w) {
-        /* Already 4:3 or narrower (320×240, 256×240): pass directly. */
+    if (target_w > 640) target_w = 640;        /* buf cap */
+
+    if (target_w == w) {
+        /* Exactly 4:3 already (320×240): pass straight through. */
         hwdisp_set_target_aspect(16, 9);
         hwdisp_set_filter(0);
         hwdisp_present(src, w, h, pitch);
         return;
     }
 
-    /* Downsample W → target_w via nearest decimation. */
-    static uint16_t buf[640 * 512];        /* fits up to 640×480 PSX hi-res */
+    /* Resample W → target_w (down for wide, up for narrow) via nearest. */
+    static uint16_t buf[640 * 512];            /* fits up to 640×480 PSX hi-res */
     static int x_map[640];
     static int last_w = -1, last_tgt = -1;
-    if (target_w > 640) target_w = 640;
-
     if (w != last_w || target_w != last_tgt) {
         for (int dx = 0; dx < target_w; dx++) x_map[dx] = dx * w / target_w;
         last_w = w; last_tgt = target_w;
