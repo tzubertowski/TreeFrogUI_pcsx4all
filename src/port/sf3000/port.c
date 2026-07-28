@@ -90,6 +90,7 @@ unsigned short *SCREEN        = NULL;
 int             SCREEN_WIDTH  = 320;
 int             SCREEN_HEIGHT = 240;
 int             scale_mode    = 0;   /* 0=aspect-correct, 1=fullscreen */
+int             hires_fix     = 0;   /* 0=transparent (raw frame -> HW scaler, full speed, natural default); 1=SW-decimate tall (>256) frames + exact 4:3 so disp_frame can present hi-res without wedging (fixes Colin/Worms freeze/black, costs per-frame CPU) */
 int             scale_filter  = 1;   /* 0=nearest (SW fb0 — broken on this HW), 1=bilinear (HW HCGE) */
 int             use_hwdisp    = 0;   /* 0=software path, 1=HW via driver.so */
 
@@ -298,7 +299,7 @@ static void display_blit(const void *src, int w, int h, int pitch) {
      * boundary. Boundary-driven, not device-hardcoded: SF-class has no effective
      * cap, so it keeps full-res; any device that can't present tall frames does. */
     static uint16_t hbuf[320 * 256];
-    if (h > tf_max_present_h()) {
+    if (hires_fix && h > tf_max_present_h()) {
         int dw = w / 2, dh = h / 2;
         if (dw > 320) dw = 320;
         if (dh > 256) dh = 256;
@@ -314,9 +315,17 @@ static void display_blit(const void *src, int w, int h, int pitch) {
      * activated HCGE in this process, because per-frame dis_assert() can't
      * override HCGE display routing on this hardware. */
     if (use_hwdisp) {
-        if (scale_mode == 0) {
-            /* Aspect-correct: PSX 4:3 regardless of internal resolution */
+        if (scale_mode == 0 && hires_fix) {
+            /* Aspect-correct: PSX 4:3 regardless of internal resolution (SW resample). */
             compose_aspect_4to3(src, w, h, pitch);
+        } else if (scale_mode == 0) {
+            /* Hi-Res Fix OFF => fully transparent: NO software resampling at all.
+             * Hand the raw frame to the driver and let the HW scaler fit it to the
+             * panel (aspect via the driver flag). Non-square modes lose exact 4:3,
+             * but there is zero per-frame CPU cost. */
+            set_panel_aspect();
+            hwdisp_set_filter(0);
+            hwdisp_present(src, w, h, pitch);
         } else {
             /* Fullscreen stretch */
             hwdisp_set_target_aspect(0, 0);
@@ -600,11 +609,13 @@ static void sf3000_menu(void) {
             snprintf(gamma_label, sizeof(gamma_label), "Gamma:  %d.%02d",
                      gamma_percent / 100, gamma_percent % 100);
 
-        char pixskip_label[48], ilace_label[48];
+        char pixskip_label[48], ilace_label[48], hires_label[48];
         snprintf(pixskip_label, sizeof(pixskip_label), "Pixel Skip (speed): %s",
                  gpu_unai_config_ext.pixel_skip ? "On" : "Off");
         snprintf(ilace_label, sizeof(ilace_label), "Interlace (speed):  %s",
                  gpu_unai_config_ext.ilace_force ? "On" : "Off");
+        snprintf(hires_label, sizeof(hires_label), "Hi-Res Fix:         %s",
+                 hires_fix ? "On" : "Off");
 
         const char *items[] = {
             "Resume",
@@ -614,6 +625,7 @@ static void sf3000_menu(void) {
             gamma_label,
             pixskip_label,
             ilace_label,
+            hires_label,
             "PCSX Settings",
             "Controls (remap)",
             "Exit to FrogUI",
@@ -664,6 +676,8 @@ static void sf3000_menu(void) {
                 gpu_unai_config_ext.pixel_skip = !gpu_unai_config_ext.pixel_skip;
             } else if (sel == 6) {
                 gpu_unai_config_ext.ilace_force = !gpu_unai_config_ext.ilace_force;
+            } else if (sel == 7) {
+                hires_fix = !hires_fix;
             }
         }
         if (a) {
@@ -685,7 +699,10 @@ static void sf3000_menu(void) {
                 case 6: /* interlace: A toggles */
                     gpu_unai_config_ext.ilace_force = !gpu_unai_config_ext.ilace_force;
                     break;
-                case 7: {
+                case 7: /* hi-res fix: A toggles */
+                    hires_fix = !hires_fix;
+                    break;
+                case 8: {
                     extern int GameMenu(void);
                     extern void sdl_poll_reset(void);
                     while (cv_keys && btn(*cv_keys, CV_A)) usleep(10000);
@@ -695,14 +712,14 @@ static void sf3000_menu(void) {
                     last_fb_y_off = -1; last_fb_y_len = -1;
                     break;
                 }
-                case 8: {  /* Controls (remap) */
+                case 9: {  /* Controls (remap) */
                     while (cv_keys && btn(*cv_keys, CV_A)) usleep(10000);
                     sf3000_controls_menu();
                     config_save();   /* persist immediately so a remap can't be lost */
                     prev = cv_keys ? *cv_keys : 0;
                     break;
                 }
-                case 9: config_save(); exit(0);
+                case 10: config_save(); exit(0);
             }
         }
     }
@@ -912,6 +929,7 @@ void config_load(void) {
         else if (!strcmp(line,"SpuVolume"))           spu_config.iVolume = v;
 #endif
         else if (!strcmp(line,"ScaleMode"))   scale_mode   = v;
+        else if (!strcmp(line,"HiResFix"))    hires_fix    = v ? 1 : 0;
         else if (!strcmp(line,"ScaleFilter")) scale_filter = v;
         else if (!strcmp(line,"Gamma"))       gamma_percent = (v < 100 ? 100 : (v > 250 ? 250 : v));
     }
@@ -950,6 +968,7 @@ void config_save(void) {
             spu_config.iUseInterpolation, spu_config.iUseReverb, spu_config.iVolume);
 #endif
     fprintf(f, "ScaleMode %d\nScaleFilter %d\nGamma %d\n", scale_mode, scale_filter, gamma_percent);
+    fprintf(f, "HiResFix %d\n", hires_fix);
     for (int i = 0; i < PB_COUNT; i++) fprintf(f, "PsxBind%d %d\n", i, pb_bind[i]);
     if (Config.LastDir[0]) fprintf(f, "LastDir %s\n", Config.LastDir);
     if (Config.BiosDir[0]) fprintf(f, "BiosDir %s\n", Config.BiosDir);
