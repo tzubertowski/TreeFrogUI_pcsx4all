@@ -556,12 +556,22 @@ static void sf_fill_round(int x, int y, int w, int h, int r, uint16_t c);
 static uint16_t sf_col_text, sf_col_sel, sf_col_seltext;
 static int sf_tw, sf_th;   /* current draw-target dims (panel res in menus) */
 static void sf_draw_battery(void);
+static char g_rom_path[1024];   /* current ROM path (defined below) */
 
 /* Reusable themed menu list: header + scrolling items + pill selection + hint,
  * matching picoarch/FrogUI. Handles lists longer than the screen (scrolls to keep
  * the selection visible). Falls back to the bitmap font if the TTF didn't load. */
 int  sf3000_menu_begin(void);
 void sf3000_menu_present(void);
+/* Brief centered confirmation, e.g. after saving config. */
+static void sf_menu_toast(const char *msg) {
+    if (!sf3000_menu_begin()) { video_clear(); port_printf(2, 20, msg); video_flip(); usleep(600000); return; }
+    int w = sf_text_w(msg), x = (sf_tw - w) / 2, y = sf_th / 2 - 14;
+    sf_fill_round(x - 16, y - 8, w + 32, 40, 20, sf_col_sel);
+    sf_text(x, y, msg, sf_col_seltext);
+    sf3000_menu_present();
+    usleep(650000);
+}
 static void sf_menu_draw(const char *title, const char *const *items, int n,
                          int sel, const char *hint) {
     if (!sf3000_menu_begin()) {   /* not ready: bitmap fallback on SCREEN */
@@ -678,6 +688,10 @@ static void sf3000_menu(void) {
         snprintf(hires_label, sizeof(hires_label), "Hi-Res Fix:         %s",
                  hires_fix ? "On" : "Off");
 
+        extern int config_have_game(void);
+        char gamecfg_label[48];
+        snprintf(gamecfg_label, sizeof gamecfg_label, "Save Config: This Game%s",
+                 config_have_game() ? " *" : "");
         const char *items[] = {
             "Resume",
             "Save State (slot 1)",
@@ -689,7 +703,9 @@ static void sf3000_menu(void) {
             hires_label,
             "PCSX Settings",
             "Controls (remap)",
-            "Exit to FrogUI",
+            "Save Config: Global",   /* 10 */
+            gamecfg_label,           /* 11 */
+            "Exit to FrogUI",        /* 12 */
             NULL
         };
         int n = 0; while (items[n]) n++;
@@ -768,11 +784,22 @@ static void sf3000_menu(void) {
                 case 9: {  /* Controls (remap) */
                     while (cv_keys && btn(*cv_keys, CV_A)) usleep(10000);
                     sf3000_controls_menu();
-                    config_save();   /* persist immediately so a remap can't be lost */
+                    prev = cv_keys ? *cv_keys : 0;   /* NOT auto-saved: use Save Config */
+                    break;
+                }
+                case 10: {  /* Save Config (global) */
+                    void config_save(void); config_save();
+                    sf_menu_toast("Saved global config");
                     prev = cv_keys ? *cv_keys : 0;
                     break;
                 }
-                case 10: config_save(); exit(0);
+                case 11: {  /* Save Config (this game) */
+                    void config_save_game(void); config_save_game();
+                    sf_menu_toast("Saved game config");
+                    prev = cv_keys ? *cv_keys : 0;
+                    break;
+                }
+                case 12: exit(0);   /* Exit: no autosave */
             }
         }
     }
@@ -826,9 +853,8 @@ void pad_update(void) {
     if (!cv_keys) return;
     uint32_t k = *cv_keys;
 
-    /* SELECT+START → exit to FrogUI */
+    /* SELECT+START → exit to FrogUI (no autosave; use Save Config in the menu) */
     if (btn(k, CV_SEL) && btn(k, CV_START)) {
-        config_save();
         exit(0);
     }
 
@@ -1149,9 +1175,20 @@ void Set_Controller_Mode(void) {
 /* --------------------------------------------------------------------------
  * Config load/save (matches icube-written cfg format)
  * -------------------------------------------------------------------------- */
-void config_load(void) {
-    char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/pcsx4all.cfg", homedir);
+/* Per-game config path: homedir/config/<rom basename, no ext>.cfg */
+static void config_game_path(char *out, size_t n) {
+    const char *base = g_rom_path[0] ? strrchr(g_rom_path, '/') : NULL;
+    base = base ? base + 1 : (g_rom_path[0] ? g_rom_path : "game");
+    char name[300]; strncpy(name, base, sizeof name - 1); name[sizeof name - 1] = 0;
+    char *dot = strrchr(name, '.'); if (dot) *dot = 0;
+    snprintf(out, n, "%s/config/%s.cfg", homedir, name);
+}
+int config_have_game(void) {   /* does a per-game override exist? */
+    char p[PATH_MAX]; config_game_path(p, sizeof p);
+    FILE *f = fopen(p, "r"); if (f) { fclose(f); return 1; } return 0;
+}
+
+static void config_read(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) return;
 
@@ -1214,9 +1251,16 @@ void config_load(void) {
     fclose(f);
 }
 
-void config_save(void) {
-    char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/pcsx4all.cfg", homedir);
+/* Load global config, then layer the per-game override on top (if any). */
+void config_load(void) {
+    char p[PATH_MAX];
+    snprintf(p, sizeof p, "%s/pcsx4all.cfg", homedir);
+    config_read(p);
+    config_game_path(p, sizeof p);
+    config_read(p);   /* no-op if absent; overrides global where present */
+}
+
+static void config_write(const char *path) {
     FILE *f = fopen(path, "w");
     if (!f) return;
     fprintf(f, "CONFIG_VERSION 0\n"
@@ -1252,6 +1296,25 @@ void config_save(void) {
     if (Config.BiosDir[0]) fprintf(f, "BiosDir %s\n", Config.BiosDir);
     if (Config.Bios[0])    fprintf(f, "Bios %s\n",    Config.Bios);
     fclose(f);
+}
+
+/* Explicit saves (no autosave-on-exit). Global = pcsx4all.cfg; per-game =
+ * config/<rom>.cfg (loaded over the global at launch). */
+void config_save(void) {   /* global */
+    char p[PATH_MAX];
+    snprintf(p, sizeof p, "%s/pcsx4all.cfg", homedir);
+    config_write(p);
+}
+void config_save_game(void) {
+    char dir[PATH_MAX], p[PATH_MAX];
+    snprintf(dir, sizeof dir, "%s/config", homedir);
+    mkdir(dir, 0755);
+    config_game_path(p, sizeof p);
+    config_write(p);
+}
+void config_delete_game(void) {
+    char p[PATH_MAX]; config_game_path(p, sizeof p);
+    unlink(p);
 }
 
 /* --------------------------------------------------------------------------
@@ -1434,7 +1497,9 @@ int main(int argc, char *argv[]) {
     spu_config.iDisabled          = 0;
 #endif
 
-    config_load();
+    /* ROM path first, so config_load() can find the per-game override. */
+    if (argc >= 2) strncpy(g_rom_path, argv[1], sizeof(g_rom_path)-1);
+    config_load();   /* global config, then per-game override on top */
 
     /* Memory cards: the sf3000 port never set these, so Config.Mcd1/2 were
      * empty → BIOS reported "no card" → games couldn't save. Point them at
@@ -1506,6 +1571,6 @@ int main(int argc, char *argv[]) {
 
     psxCpu->Execute();
 
-    config_save();
+    /* No autosave on exit - config is saved only via the menu's Save Config. */
     return 0;
 }
