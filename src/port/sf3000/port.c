@@ -555,6 +555,7 @@ static void sf_text(int x, int y, const char *s, uint16_t color);
 static void sf_fill_round(int x, int y, int w, int h, int r, uint16_t c);
 static uint16_t sf_col_text, sf_col_sel, sf_col_seltext;
 static int sf_tw, sf_th;   /* current draw-target dims (panel res in menus) */
+static void sf_draw_battery(void);
 
 /* Reusable themed menu list: header + scrolling items + pill selection + hint,
  * matching picoarch/FrogUI. Handles lists longer than the screen (scrolls to keep
@@ -585,6 +586,7 @@ static void sf_menu_draw(const char *title, const char *const *items, int n,
     if (off > n - vis) off = n - vis; if (off < 0) off = 0;
 
     { char h[96]; snprintf(h, sizeof h, ">>> %s", title); sf_text(pad, pad, h, sf_col_sel); }
+    sf_draw_battery();
     int y0 = pad + header_h;
     for (int i = 0; i < vis; i++) {
         int idx = off + i, ry = y0 + i * rowh;
@@ -1008,6 +1010,59 @@ void sf3000_menu_pill(int x, int y, int w, int h, uint16_t c) { sf_fill_round(x,
 uint16_t sf3000_col_text(void)    { return sf_col_text; }
 uint16_t sf3000_col_sel(void)     { return sf_col_sel; }
 uint16_t sf3000_col_seltext(void) { return sf_col_seltext; }
+void sf3000_menu_battery(void);
+
+/* Battery for the menu (same sources as FrogUI/picoarch): /dev/check_adc1 =
+ * level byte, /dev/check_adc5 = charge (~0 idle, ~140 charging). Persistent
+ * O_RDWR fds. "Battery Colour Mode" read from frogui/settings.txt. */
+static int sf_adc_read(int slot) {
+    static int fd[2] = { -2, -2 };
+    static const char *node[2] = { "/dev/check_adc1", "/dev/check_adc5" };
+    if (slot < 0 || slot > 1) return -1;
+    if (fd[slot] == -2) fd[slot] = open(node[slot], O_RDWR);
+    if (fd[slot] < 0) return -1;
+    unsigned char b = 0; lseek(fd[slot], 0, SEEK_SET);
+    return (read(fd[slot], &b, 1) == 1) ? b : -1;
+}
+static int sf_batt_pct(int *charging) {
+    int a1 = sf_adc_read(0), a5 = sf_adc_read(1);
+    *charging = (a5 >= 64) ? 1 : 0;
+    if (a1 < 0) return -1;
+    static const int rx[] = {64,153,224,255}, py[] = {0,50,80,100};
+    if (a1 <= rx[0]) return 0;
+    for (int i = 1; i < 4; i++) if (a1 <= rx[i]) {
+        int sp = rx[i]-rx[i-1]; return py[i-1] + (py[i]-py[i-1])*(a1-rx[i-1])/(sp?sp:1); }
+    return 100;
+}
+static int sf_batt_color_mode(void) {
+    static int c = -1;
+    if (c < 0) { c = 0; FILE *f = fopen("/mnt/sdcard/frogui/settings.txt","r");
+        if (f) { char l[128]; while (fgets(l,sizeof l,f)) if (!strncmp(l,"battery_color=on",16)){c=1;break;} fclose(f);} }
+    return c;
+}
+/* Draw battery in the panel buffer, top-right of the menu header. */
+static void sf_draw_battery(void) {
+    int charging, pct = sf_batt_pct(&charging);
+    if (pct < 0) return; if (pct > 100) pct = 100;
+    int pad = 14, y = 12;
+    if (sf_batt_color_mode()) {
+        uint16_t c = charging ? 0x2FE6 : (pct>=70)?0x2FE6 : (pct>=30)?0x041F : 0xF800;
+        int d = 14; sf_fill_round(sf_tw - pad - d, y, d, d, d/2, c);
+        return;
+    }
+    int bw = 30, bh = 15, nub = 3, p = 2;
+    int x = sf_tw - pad - bw - nub;
+    uint16_t out = sf_col_text;
+    uint16_t fillc = charging ? 0x2FE6 : (pct<=15)?0xF800 : sf_col_text;
+    /* outline (rounded), hollow interior, nub, fill */
+    sf_fill_round(x, y, bw, bh, 4, out);
+    sf_fill_round(x+1, y+1, bw-2, bh-2, 3, 0x0000);
+    for (int j = (bh-bh/2)/2; j < (bh+bh/2)/2; j++)
+        for (int i = 0; i < nub; i++) { int py2=y+j; if(py2>=0&&py2<sf_th){ int px=x+bw+i; if(px<sf_tw) sf_tgt[py2*sf_tw+px]=out; } }
+    int iw = bw - 2*p, fw = iw*pct/100; if (fw<0) fw=0; if (fw>iw) fw=iw;
+    if (fw > 0) sf_fill_round(x+p, y+p, fw, bh-2*p, (bh-2*p)/2, fillc);
+}
+void sf3000_menu_battery(void) { sf_draw_battery(); }
 
 /* Panel-res menu frame: point drawing at a panel-sized buffer + clear. All sf_
  * draws now land at device resolution (crisp), like TreeFrogUI. */

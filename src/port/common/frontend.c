@@ -2206,6 +2206,7 @@ extern int  sf3000_menu_begin(void);     /* panel-res menu frame */
 extern void sf3000_menu_present(void);
 extern int  sf3000_panel_w(void);
 extern int  sf3000_panel_h(void);
+extern void sf3000_menu_battery(void);
 
 static void ShowMenuItem(int x, int y, MENUITEM *mi)
 {
@@ -2257,6 +2258,7 @@ static void ShowMenu(MENU *menu)
     if (menu->cur >= vis) top = menu->cur - vis + 1;
     if (top > menu->num - vis) top = menu->num - vis; if (top < 0) top = 0;
     sf3000_menu_text(pad, pad, ">>> PCSX4ALL", sf3000_col_sel());
+    sf3000_menu_battery();
     int y0 = pad + header_h;
     for (int i = 0; i < vis; i++) {
       int idx = top + i;
