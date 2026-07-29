@@ -546,22 +546,76 @@ static inline int btn(uint32_t state, int bit) { return (state >> bit) & 1; }
 
 void config_save(void);
 
+/* Themed-menu renderer (defined after the Video API section, below). */
+static void sf_font_init(void);
+static int  sf_font_ready;
+static int  sf_font_h(void);
+static int  sf_text_w(const char *s);
+static void sf_text(int x, int y, const char *s, uint16_t color);
+static void sf_fill_round(int x, int y, int w, int h, int r, uint16_t c);
+static uint16_t sf_col_text, sf_col_sel, sf_col_seltext;
+static int sf_tw, sf_th;   /* current draw-target dims (panel res in menus) */
+
+/* Reusable themed menu list: header + scrolling items + pill selection + hint,
+ * matching picoarch/FrogUI. Handles lists longer than the screen (scrolls to keep
+ * the selection visible). Falls back to the bitmap font if the TTF didn't load. */
+int  sf3000_menu_begin(void);
+void sf3000_menu_present(void);
+static void sf_menu_draw(const char *title, const char *const *items, int n,
+                         int sel, const char *hint) {
+    if (!sf3000_menu_begin()) {   /* not ready: bitmap fallback on SCREEN */
+        video_clear();
+        port_printf(2, 0, title);
+        for (int i = 0; i < n; i++) {
+            char buf[80]; snprintf(buf, sizeof buf, "%s%s", (i==sel)?"> ":"  ", items[i]);
+            port_printf(2, (i + 2) * 10, buf);
+        }
+        if (hint) port_printf(2, (n + 3) * 10, hint);
+        video_flip();
+        return;
+    }
+    /* themed, panel resolution (sf_tw x sf_th) */
+    int fh = sf_font_h(), rowh = fh + 8, pad = 14;
+    int header_h = rowh + 6;
+    int hint_h = hint ? (fh + 8) : 0;
+    int avail = sf_th - header_h - hint_h - pad;
+    int vis = avail / rowh; if (vis < 1) vis = 1; if (vis > n) vis = n;
+    int off = 0;
+    if (sel >= vis) off = sel - vis + 1;
+    if (off > n - vis) off = n - vis; if (off < 0) off = 0;
+
+    { char h[96]; snprintf(h, sizeof h, ">>> %s", title); sf_text(pad, pad, h, sf_col_sel); }
+    int y0 = pad + header_h;
+    for (int i = 0; i < vis; i++) {
+        int idx = off + i, ry = y0 + i * rowh;
+        if (idx == sel) {
+            int w = sf_text_w(items[idx]) + 24;
+            if (w > sf_tw - (pad - 6) * 2) w = sf_tw - (pad - 6) * 2;
+            sf_fill_round(pad - 6, ry - 4, w, fh + 6, (fh + 6) / 2, sf_col_sel);
+            sf_text(pad + 6, ry, items[idx], sf_col_seltext);
+        } else {
+            sf_text(pad + 6, ry, items[idx], sf_col_text);
+        }
+    }
+    if (off > 0)        sf_text(sf_tw - pad - 12, y0, "^", sf_col_text);
+    if (off + vis < n)  sf_text(sf_tw - pad - 12, y0 + (vis-1)*rowh, "v", sf_col_text);
+    if (hint) sf_text(pad, y0 + vis * rowh + 2, hint, sf_col_text);
+    sf3000_menu_present();
+}
+
 /* Controls remap screen: pick a PSX button, press a physical button to bind it.
  * Saved with the rest of the config on "Exit to FrogUI". */
 static void sf3000_controls_menu(void) {
     int sel = 0;
     uint32_t prev = cv_keys ? *cv_keys : 0;
     while (1) {
-        video_clear();
-        port_printf(2, 0, "=== CONTROLS (remap) ===");
+        char rows[PB_COUNT][64]; const char *items[PB_COUNT];
         for (int i = 0; i < PB_COUNT; i++) {
-            char buf[64];
-            snprintf(buf, sizeof buf, "%s%-11s = %s button",
-                     (i == sel) ? "> " : "  ", pb_name[i], cv_bit_name(pb_bind[i]));
-            port_printf(2, (i + 2) * 10, buf);
+            snprintf(rows[i], sizeof rows[i], "%-11s = %s button",
+                     pb_name[i], cv_bit_name(pb_bind[i]));
+            items[i] = rows[i];
         }
-        port_printf(2, (PB_COUNT + 3) * 10, "A=rebind  B=back  (saved on Exit)");
-        video_flip();
+        sf_menu_draw("CONTROLS (remap)", items, PB_COUNT, sel, "A=rebind  B=back");
         usleep(16000);
         if (!cv_keys) continue;
         uint32_t k = *cv_keys;
@@ -574,11 +628,16 @@ static void sf3000_controls_menu(void) {
         if (dn && sel < PB_COUNT - 1) sel++;
         if (b) return;
         if (a) {
-            video_clear();
-            port_printf(2, 0, "=== CONTROLS (remap) ===");
             char msg[64]; snprintf(msg, sizeof msg, "Press a button for %s", pb_name[sel]);
-            port_printf(2, 30, msg);
-            video_flip();
+            if (sf3000_menu_begin()) {
+                sf_text(14, 14, ">>> CONTROLS (remap)", sf_col_sel);
+                sf_text(14, 60, msg, sf_col_text);
+                sf3000_menu_present();
+            } else {
+                video_clear();
+                port_printf(2, 0, "=== CONTROLS (remap) ==="); port_printf(2, 30, msg);
+                video_flip();
+            }
             while (cv_keys && *cv_keys) usleep(10000);      /* wait all released */
             int done = 0;
             while (!done && cv_keys) {
@@ -633,15 +692,7 @@ static void sf3000_menu(void) {
         };
         int n = 0; while (items[n]) n++;
 
-        video_clear();
-        port_printf(2, 0, "=== PCSX4ALL MENU ===");
-        for (int i = 0; i < n; i++) {
-            char buf[64];
-            snprintf(buf, sizeof(buf), "%s%s", (i == sel) ? "> " : "  ", items[i]);
-            port_printf(2, (i + 2) * 10, buf);
-        }
-        port_printf(2, (n + 3) * 10, "UP/DOWN=navigate  A=select  B=back");
-        video_flip();
+        sf_menu_draw("PCSX4ALL MENU", items, n, sel, "UP/DOWN  A=select  B=back");
 
         usleep(16000);
         if (!cv_keys) continue;
@@ -824,6 +875,178 @@ void port_printf(int x, int y, const char *text) {
     if (!SCREEN || !text) return;
     extern void basic_text_out16_nf(void *fb, int w, int x, int y, const char *text);
     basic_text_out16_nf(SCREEN, SCREEN_WIDTH, x, y, text);
+}
+
+/* ==========================================================================
+ * Themed menu rendering (TTF + skin.txt colours) to match picoarch/FrogUI.
+ * Loads BPreplayBold (FrogUI's font) via stb_truetype; reads theme colours from
+ * cubegm/skin/skin.txt (written by FrogUI). Falls back to the bitmap font.
+ * ========================================================================== */
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "stb_truetype.h"
+
+#define SF_FONT_PX 26.0f
+static stbtt_fontinfo sf_font;
+static unsigned char *sf_font_buf = NULL;
+static float sf_font_scale = 0;
+static int   sf_font_asc = 0;           /* scaled ascent (baseline offset) */
+static int   sf_font_ready = 0;
+/* theme colours (RGB565); defaults ~ white text, accent pill, dark sel-text */
+static uint16_t sf_col_text = 0xFFFF, sf_col_sel = 0x2FE6, sf_col_seltext = 0x0000;
+
+/* Menus render at PANEL resolution (like TreeFrogUI) for crisp text, not at the
+ * PS1 game res. Drawing targets sf_tgt/sf_tw/sf_th (default = SCREEN); the menu
+ * path points them at a panel-sized buffer and presents it 1:1. */
+static uint16_t *sf_tgt = NULL; static int sf_tw = 0, sf_th = 0;
+static uint16_t *sf_menu_fb = NULL; static int sf_pw = 0, sf_ph = 0;
+static void sf_read_panel(void) {
+    if (sf_pw) return;
+    sf_pw = 640; sf_ph = 480;                 /* R36SX default */
+    int fd = open("/tmp/tfdevice.env", O_RDONLY);
+    if (fd >= 0) {
+        char b[512]; int n = read(fd, b, sizeof b - 1); close(fd);
+        if (n > 0) { b[n] = 0; char *p;
+            if ((p = strstr(b, "TF_PANEL_W="))) sf_pw = atoi(p + 11);
+            if ((p = strstr(b, "TF_PANEL_H="))) sf_ph = atoi(p + 11);
+        }
+    }
+    if (sf_pw < 320) sf_pw = 640; if (sf_ph < 240) sf_ph = 480;
+}
+
+static uint16_t sf_888_to_565(unsigned v) {
+    int r = (v >> 16) & 0xFF, g = (v >> 8) & 0xFF, b = v & 0xFF;
+    return (uint16_t)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+}
+static void sf_load_skin(void) {
+    FILE *f = fopen("/mnt/sdcard/cubegm/skin/skin.txt", "r");
+    if (!f) return;
+    char line[128];
+    while (fgets(line, sizeof line, f)) {
+        unsigned v;
+        if (sscanf(line, "text_color=0x%x", &v) == 1)      sf_col_text = sf_888_to_565(v);
+        else if (sscanf(line, "selection_color=0x%x", &v) == 1) sf_col_sel = sf_888_to_565(v);
+        else if (sscanf(line, "sel_text_color=0x%x", &v) == 1)  sf_col_seltext = sf_888_to_565(v);
+    }
+    fclose(f);
+}
+static void sf_font_init(void) {
+    if (sf_font_ready) return;
+    sf_font_ready = -1;   /* tried */
+    const char *paths[] = { "/mnt/sdcard/frogui/fonts/BPreplayBold.otf",
+                            "/mnt/sdcard/frogui/fonts/GamePocket-Regular-ZeroKern.ttf", NULL };
+    for (int i = 0; paths[i]; i++) {
+        FILE *f = fopen(paths[i], "rb");
+        if (!f) continue;
+        fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+        if (n <= 0) { fclose(f); continue; }
+        sf_font_buf = (unsigned char*)malloc(n);
+        if (!sf_font_buf) { fclose(f); return; }
+        if (fread(sf_font_buf, 1, n, f) != (size_t)n) { fclose(f); free(sf_font_buf); sf_font_buf = NULL; continue; }
+        fclose(f);
+        if (!stbtt_InitFont(&sf_font, sf_font_buf, stbtt_GetFontOffsetForIndex(sf_font_buf, 0))) {
+            free(sf_font_buf); sf_font_buf = NULL; continue;
+        }
+        sf_font_scale = stbtt_ScaleForPixelHeight(&sf_font, SF_FONT_PX);
+        int asc, desc, gap; stbtt_GetFontVMetrics(&sf_font, &asc, &desc, &gap);
+        sf_font_asc = (int)(asc * sf_font_scale + 0.5f);
+        sf_font_ready = 1;
+        sf_load_skin();
+        return;
+    }
+}
+static int sf_text_w(const char *s) {
+    if (sf_font_ready != 1) return (int)strlen(s) * 8;
+    int w = 0, prev = 0;
+    for (; *s; s++) {
+        int gi = stbtt_FindGlyphIndex(&sf_font, (unsigned char)*s);
+        int adv, lsb; stbtt_GetGlyphHMetrics(&sf_font, gi, &adv, &lsb);
+        if (prev) w += (int)(stbtt_GetGlyphKernAdvance(&sf_font, prev, gi) * sf_font_scale);
+        w += (int)(adv * sf_font_scale); prev = gi;
+    }
+    return w;
+}
+static int sf_font_h(void) { return sf_font_ready == 1 ? (int)(SF_FONT_PX) : 8; }
+
+/* Draw UTF-8/ASCII text at (x, y=top) in RGB565 colour, alpha-blended. */
+static void sf_text(int x, int y, const char *s, uint16_t color) {
+    if (sf_font_ready != 1) { port_printf(x, y, s); return; }
+    int pen = x, prev = 0;
+    int cr = (color >> 11) & 0x1f, cg = (color >> 5) & 0x3f, cb = color & 0x1f;
+    for (; *s; s++) {
+        int gi = stbtt_FindGlyphIndex(&sf_font, (unsigned char)*s);
+        if (prev) pen += (int)(stbtt_GetGlyphKernAdvance(&sf_font, prev, gi) * sf_font_scale);
+        int x0,y0,x1,y1;
+        stbtt_GetGlyphBitmapBox(&sf_font, gi, sf_font_scale, sf_font_scale, &x0,&y0,&x1,&y1);
+        int gw = x1-x0, gh = y1-y0;
+        if (gw > 0 && gh > 0 && gw < 64 && gh < 64) {
+            unsigned char bmp[64*64];
+            stbtt_MakeGlyphBitmap(&sf_font, bmp, gw, gh, gw, sf_font_scale, sf_font_scale, gi);
+            for (int j = 0; j < gh; j++) {
+                int py = y + sf_font_asc + y0 + j;
+                if (py < 0 || py >= sf_th) continue;
+                uint16_t *row = sf_tgt + py * sf_tw;
+                for (int i = 0; i < gw; i++) {
+                    int a = bmp[j*gw+i]; if (!a) continue;
+                    int px = pen + x0 + i; if (px < 0 || px >= sf_tw) continue;
+                    uint16_t d = row[px];
+                    int dr=(d>>11)&0x1f, dg=(d>>5)&0x3f, db=d&0x1f, ia=255-a;
+                    int rr=(cr*a+dr*ia)/255, rg=(cg*a+dg*ia)/255, rb=(cb*a+db*ia)/255;
+                    row[px] = (uint16_t)((rr<<11)|(rg<<5)|rb);
+                }
+            }
+        }
+        int adv, lsb; stbtt_GetGlyphHMetrics(&sf_font, gi, &adv, &lsb);
+        pen += (int)(adv * sf_font_scale); prev = gi;
+    }
+}
+/* Themed-menu API exposed to frontend.c (its ShowMenu uses these). */
+int  sf3000_menu_ready(void)  { sf_font_init(); return sf_font_ready == 1; }
+int  sf3000_menu_font_h(void) { return sf_font_h(); }
+int  sf3000_menu_text_w(const char *s) { return sf_text_w(s); }
+void sf3000_menu_text(int x, int y, const char *s, uint16_t color) { sf_text(x, y, s, color); }
+void sf3000_menu_pill(int x, int y, int w, int h, uint16_t c) { sf_fill_round(x, y, w, h, h/2, c); }
+uint16_t sf3000_col_text(void)    { return sf_col_text; }
+uint16_t sf3000_col_sel(void)     { return sf_col_sel; }
+uint16_t sf3000_col_seltext(void) { return sf_col_seltext; }
+
+/* Panel-res menu frame: point drawing at a panel-sized buffer + clear. All sf_
+ * draws now land at device resolution (crisp), like TreeFrogUI. */
+int sf3000_menu_begin(void) {
+    if (!sf3000_menu_ready()) return 0;
+    sf_read_panel();
+    if (!sf_menu_fb) { sf_menu_fb = (uint16_t*)malloc((size_t)sf_pw * sf_ph * 2); if (!sf_menu_fb) return 0; }
+    sf_tgt = sf_menu_fb; sf_tw = sf_pw; sf_th = sf_ph;
+    memset(sf_menu_fb, 0, (size_t)sf_pw * sf_ph * 2);
+    return 1;
+}
+/* Present the panel-res menu buffer 1:1 (driver scales panel->panel = crisp). */
+void sf3000_menu_present(void) {
+    extern void hwdisp_present(const void *, int, int, int);
+    extern void hwdisp_set_target_aspect(int, int);
+    extern void hwdisp_set_filter(int);
+    if (!sf_menu_fb) return;
+    hwdisp_set_target_aspect(0, 0);   /* fill panel, no pad */
+    hwdisp_set_filter(0);
+    hwdisp_present(sf_menu_fb, sf_pw, sf_ph, sf_pw * 2);
+    sf_tgt = SCREEN; sf_tw = SCREEN_WIDTH; sf_th = SCREEN_HEIGHT;  /* restore */
+}
+int  sf3000_panel_w(void) { sf_read_panel(); return sf_pw; }
+int  sf3000_panel_h(void) { sf_read_panel(); return sf_ph; }
+
+/* Filled rounded rect (pill) for the selection highlight. */
+static void sf_fill_round(int x, int y, int w, int h, int r, uint16_t c) {
+    if (w <= 0 || h <= 0) return;
+    for (int j = 0; j < h; j++) {
+        int py = y + j; if (py < 0 || py >= sf_th) continue;
+        int inset = 0;
+        if (j < r)        { int d = r - j; inset = r - (int)(sqrtf((float)(r*r - d*d))); }
+        else if (j >= h-r){ int d = j-(h-r)+1; inset = r - (int)(sqrtf((float)(r*r - d*d))); }
+        uint16_t *row = sf_tgt + py * sf_tw;
+        for (int i = inset; i < w-inset; i++) {
+            int px = x + i; if (px < 0 || px >= SCREEN_WIDTH) continue;
+            row[px] = c;
+        }
+    }
 }
 
 /* --------------------------------------------------------------------------

@@ -2192,6 +2192,21 @@ static int gui_Quit()
 	return 0;
 }
 
+/* Themed-menu API from the SF3000 port (TTF + skin.txt colours + pill). */
+extern int  sf3000_menu_ready(void);
+extern int  sf3000_menu_font_h(void);
+extern int  sf3000_menu_text_w(const char *s);
+extern void sf3000_menu_text(int x, int y, const char *s, unsigned short color);
+extern void sf3000_menu_pill(int x, int y, int w, int h, unsigned short c);
+extern unsigned short sf3000_col_text(void);
+extern unsigned short sf3000_col_sel(void);
+extern unsigned short sf3000_col_seltext(void);
+extern int SCREEN_WIDTH, SCREEN_HEIGHT;
+extern int  sf3000_menu_begin(void);     /* panel-res menu frame */
+extern void sf3000_menu_present(void);
+extern int  sf3000_panel_w(void);
+extern int  sf3000_panel_h(void);
+
 static void ShowMenuItem(int x, int y, MENUITEM *mi)
 {
   static char string[PATH_MAX];
@@ -2210,8 +2225,49 @@ static void ShowMenuItem(int x, int y, MENUITEM *mi)
   }
 }
 
+/* Themed row: name + showval, pill highlight when selected. */
+static void ShowMenuItemThemed(int x, int y, MENUITEM *mi, int selected)
+{
+  static char string[PATH_MAX];
+  if (!mi->name) return;
+  if (mi->showval) sprintf(string, "%s %s", mi->name, (*mi->showval)());
+  else             snprintf(string, sizeof string, "%s", mi->name);
+  int fh = sf3000_menu_font_h();
+  if (selected) {
+    int w = sf3000_menu_text_w(string) + 24;
+    if (w > SCREEN_WIDTH - (x - 6) * 2) w = SCREEN_WIDTH - (x - 6) * 2;
+    sf3000_menu_pill(x - 6, y - 4, w, fh + 6, sf3000_col_sel());
+    sf3000_menu_text(x + 6, y, string, sf3000_col_seltext());
+  } else {
+    sf3000_menu_text(x + 6, y, string, sf3000_col_text());
+  }
+}
+
 static void ShowMenu(MENU *menu)
 {
+  /* Themed path: panel-res buffer, TTF font, theme colours, pill, scroll. */
+  if (sf3000_menu_begin()) {
+    int pw = sf3000_panel_w(), ph = sf3000_panel_h();
+    int fh = sf3000_menu_font_h();
+    int rowh = fh + 8, pad = 14;
+    int header_h = rowh + 6;
+    int vis = (ph - header_h - pad) / rowh;
+    if (vis < 1) vis = 1; if (vis > menu->num) vis = menu->num;
+    int top = 0;
+    if (menu->cur >= vis) top = menu->cur - vis + 1;
+    if (top > menu->num - vis) top = menu->num - vis; if (top < 0) top = 0;
+    sf3000_menu_text(pad, pad, ">>> PCSX4ALL", sf3000_col_sel());
+    int y0 = pad + header_h;
+    for (int i = 0; i < vis; i++) {
+      int idx = top + i;
+      ShowMenuItemThemed(pad, y0 + i * rowh, menu->m + idx, idx == menu->cur);
+    }
+    if (top > 0)               sf3000_menu_text(pw - pad - 12, y0, "^", sf3000_col_text());
+    if (top + vis < menu->num) sf3000_menu_text(pw - pad - 12, y0 + (vis-1)*rowh, "v", sf3000_col_text());
+    sf3000_menu_present();
+    return;
+  }
+
 	MENUITEM* mi = menu->m + menu->cur_top;
 	int cnt = menu->page_num;
 	int cur = menu->cur - menu->cur_top;
@@ -2334,10 +2390,10 @@ static int gui_RunMenu(MENU *menu)
 		}
     }
 
-    // diplay menu
+    // diplay menu (themed ShowMenu presents at panel res itself)
     ShowMenu(menu);
 
-    video_flip();
+    if (!sf3000_menu_ready()) video_flip();
     timer_delay(75);
 
     if (keys & (KEY_A | KEY_B | KEY_X | KEY_Y | KEY_L | KEY_R |
